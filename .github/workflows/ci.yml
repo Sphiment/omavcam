@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  manifest:
+    name: Validate manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: manifest.json is valid JSON
+        run: jq -e . manifest.json > /dev/null
+
+      # Mirrors the checks in omarchy-plugin-validate, which is not available on
+      # a runner: schemaVersion, required fields, a safe id outside the reserved
+      # namespace, and an entry point on disk for every kind that needs one.
+      - name: Manifest matches the Omarchy plugin schema
+        run: |
+          set -euo pipefail
+
+          jq -e '.schemaVersion == 1' manifest.json > /dev/null \
+            || { echo "schemaVersion must be the number 1"; exit 1; }
+
+          for field in id name version kinds entryPoints; do
+            jq -e --arg f "$field" 'has($f)' manifest.json > /dev/null \
+              || { echo "manifest missing required field '$field'"; exit 1; }
+          done
+
+          id=$(jq -r '.id' manifest.json)
+          [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+            || { echo "invalid plugin id '$id'"; exit 1; }
+          [[ $id != omarchy.* ]] \
+            || { echo "id '$id' uses the reserved omarchy.* namespace"; exit 1; }
+
+          jq -e '(.kinds | type) == "array" and (.kinds | length) > 0' manifest.json > /dev/null \
+            || { echo "'kinds' must be a non-empty array"; exit 1; }
+
+          while IFS= read -r ep; do
+            [[ $ep != /* && $ep != *".."* ]] \
+              || { echo "unsafe entry point path '$ep'"; exit 1; }
+            [[ -f $ep ]] \
+              || { echo "entry point file not found: '$ep'"; exit 1; }
+          done < <(jq -r '.entryPoints[]' manifest.json)
+
+          while IFS=: read -r kind key; do
+            jq -e --arg k "$kind" '(.kinds | index($k)) != null' manifest.json > /dev/null || continue
+            jq -e --arg k "$key" '.entryPoints | has($k)' manifest.json > /dev/null \
+              || { echo "kind '$kind' requires entryPoints.$key"; exit 1; }
+          done <<< "bar:bar
+          bar-widget:barWidget
+          menu:menu
+          overlay:overlay
+          panel:panel
+          service:service"
+
+      # The shell refuses to load a plugin folder containing a symlink, since a
+      # symlink could point out of the trusted plugins directory once installed.
+      - name: No symlinks in the plugin folder
+        run: |
+          link=$(find . -name .git -prune -o -type l -print -quit)
+          [[ -z $link ]] || { echo "symlinks are not allowed: $link"; exit 1; }
+
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run shellcheck over bin/
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          scripts=(bin/*)
+          if (( ${#scripts[@]} == 0 )); then
+            echo "no scripts in bin/ yet"
+            exit 0
+          fi
+          shellcheck "${scripts[@]}"
