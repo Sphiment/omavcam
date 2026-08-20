@@ -34,6 +34,20 @@ readonly STATE_DIR
 readonly PID_FILE="$STATE_DIR/capture.pid"
 readonly META_FILE="$STATE_DIR/capture.json"
 readonly LOG_FILE="$STATE_DIR/capture.log"
+readonly PREVIEW_PID_FILE="$STATE_DIR/preview.pid"
+readonly PREVIEW_SIZE_FILE="$STATE_DIR/preview.size"
+
+# The preview window is identified by title, which both mpv and scrcpy can set,
+# so one set of Hyprland rules covers either source.
+readonly PREVIEW_TITLE="OmavcamPreview"
+readonly PREVIEW_MARGIN=40
+
+# loopback shows the node itself — exactly the frames the meeting app receives,
+# and independent of the capture, so it can be toggled at will. scrcpy shows
+# scrcpy's own window, which costs no second process and can control the phone,
+# but is part of the capture and so toggling it restarts the stream.
+PREVIEW_SOURCE="${OMAVCAM_PREVIEW_SOURCE:-loopback}"
+readonly PREVIEW_SOURCE
 
 usage() {
   cat <<'USAGE'
@@ -47,6 +61,7 @@ Commands:
   start [options]   Start streaming the phone camera to the virtual camera
   stop              Stop streaming
   status [--json]   Report whether a capture is running
+  preview <action>  on, off, toggle, or resize <preset>
   help              Show this message
 
 Start options:
@@ -55,11 +70,16 @@ Start options:
       --camera-id <id>    Explicit camera id; overrides --facing
       --size <WxH>        Capture resolution; must be one the camera offers,
                           as listed by "omavcam cameras"
+      --window            Show scrcpy's own window (used by the scrcpy preview)
       --fps <n>           Capture frame rate
       --v4l2-buffer <ms>  Buffering, to smooth a stuttering stream
 
+Preview presets:
+  small, medium, large, smaller, larger, reset
+
 Environment:
-  OMAVCAM_VIDEO_NR  Which /dev/videoN to claim (default: 42)
+  OMAVCAM_VIDEO_NR        Which /dev/videoN to claim (default: 42)
+  OMAVCAM_PREVIEW_SOURCE  loopback (default) or scrcpy
 USAGE
 }
 
@@ -638,9 +658,10 @@ cmd_cameras() {
 # ----------------------------------------------------------------- start ----
 
 cmd_start() {
-  local serial="" facing="front" camera_id="" size="" fps="" v4l2_buffer=""
+  local serial="" facing="front" camera_id="" size="" fps="" v4l2_buffer="" show_window=false
   while (($# > 0)); do
     case "$1" in
+    --window) show_window=true ;;
     -s | --serial) serial="${2:?--serial needs a value}" && shift ;;
     --facing) facing="${2:?--facing needs a value}" && shift ;;
     --camera-id) camera_id="${2:?--camera-id needs a value}" && shift ;;
@@ -693,13 +714,19 @@ cmd_start() {
   [[ -n $fps ]] && args+=("--camera-fps=$fps")
   [[ -n $v4l2_buffer ]] && args+=("--v4l2-buffer=$v4l2_buffer")
 
-  # Headless by default. --no-window is the clean suppression where scrcpy has
-  # it; --no-video-playback is the documented v4l2 companion and covers the
-  # releases that lack it.
-  if scrcpy_supports --no-window; then
-    args+=(--no-window)
+  if [[ $show_window == true ]]; then
+    # scrcpy cannot set a Wayland app id, so the window is labelled with a title
+    # the Hyprland preview rules can match on.
+    args+=("--window-title=$PREVIEW_TITLE")
   else
-    args+=(--no-video-playback)
+    # Headless by default. --no-window is the clean suppression where scrcpy has
+    # it; --no-video-playback is the documented v4l2 companion and covers the
+    # releases that lack it.
+    if scrcpy_supports --no-window; then
+      args+=(--no-window)
+    else
+      args+=(--no-video-playback)
+    fi
   fi
 
   printf 'Starting capture from %s on %s\n' "$serial" "$DEVICE"
@@ -716,9 +743,11 @@ cmd_start() {
     --arg cameraId "$camera_id" \
     --arg size "$size" \
     --arg fps "$fps" \
+    --argjson window "$show_window" \
     --argjson startedAt "$(date +%s)" \
     '{serial: $serial, mode: $mode, device: $device, facing: $facing,
-      cameraId: $cameraId, size: $size, fps: $fps, startedAt: $startedAt}' \
+      cameraId: $cameraId, size: $size, fps: $fps, window: $window,
+      startedAt: $startedAt}' \
     >"$META_FILE"
 
   # scrcpy has to push and start its server on the phone before a frame ever
@@ -751,6 +780,12 @@ cmd_start() {
 
 cmd_stop() {
   (($# == 0)) || die "stop takes no options"
+
+  # A loopback preview reads the node the capture feeds; leaving it open after
+  # the stream ends strands an mpv showing a frozen last frame.
+  if [[ $PREVIEW_SOURCE != scrcpy ]] && preview_running; then
+    preview_stop >/dev/null 2>&1 || true
+  fi
 
   local pid
   if ! pid=$(capture_pid); then
@@ -805,12 +840,18 @@ cmd_status() {
   device_streaming && streaming=true
 
   if [[ $as_json == true ]]; then
+    local preview_open=false
+    preview_running && preview_open=true
     jq -n \
       --argjson running "$running" \
       --argjson streaming "$streaming" \
       --arg pid "$pid" \
       --argjson meta "$meta" \
-      '{running: $running, streaming: $streaming, pid: $pid, capture: $meta}
+      --argjson previewOpen "$preview_open" \
+      --arg previewSize "$(preview_size_name)" \
+      --arg previewSource "$PREVIEW_SOURCE" \
+      '{running: $running, streaming: $streaming, pid: $pid, capture: $meta,
+        preview: {open: $previewOpen, size: $previewSize, source: $previewSource}}
        | .uptimeSec = (if $meta.startedAt then (now | floor) - $meta.startedAt else null end)'
     return 0
   fi
@@ -825,6 +866,304 @@ cmd_status() {
   printf '  camera   %s\n' "$(jq -r 'if .cameraId != "" then "id " + .cameraId else .facing end' <<<"$meta")"
   printf '  pid      %s\n' "$pid"
   printf '  live     %s\n' "$streaming"
+  preview_running && printf '  preview  %s (%s)\n' "$(preview_size_name)" "$PREVIEW_SOURCE"
+}
+
+# --------------------------------------------------------------- preview ----
+
+preview_app_id() {
+  printf '%s-%s\n' "$PREVIEW_TITLE" "${1:-medium}"
+}
+
+preview_size_name() {
+  local size=medium
+  [[ -r $PREVIEW_SIZE_FILE ]] && read -r size <"$PREVIEW_SIZE_FILE" 2>/dev/null
+  case "$size" in
+  small | medium | large) printf '%s\n' "$size" ;;
+  *) printf 'medium\n' ;;
+  esac
+}
+
+# Hyprland 0.56 parses its config with Lua and refuses `hyprctl keyword`, so
+# rules go in through eval. The legacy keyword path stays as a fallback for
+# older Hyprland, and both are best-effort: a missing preview rule costs a
+# tidily placed window, never the capture.
+hypr_rule() {
+  hyprctl eval "$1" >/dev/null 2>&1 ||
+    hyprctl keyword "$2" "$3" >/dev/null 2>&1 ||
+    true
+}
+
+hypr_dispatch() {
+  local lua="$1"
+  shift
+  hyprctl dispatch "$lua" >/dev/null 2>&1 || hyprctl dispatch "$@" >/dev/null 2>&1 || true
+}
+
+# Applied at runtime rather than written into the user's Hyprland config: a
+# plugin has no business editing files it does not own, and these only need to
+# outlive the session.
+apply_preview_rules() {
+  command -v hyprctl >/dev/null 2>&1 || return 0
+
+  local size
+  for size in small medium large; do
+    hypr_rule \
+      "o.window(\"^($(preview_app_id "$size"))\$\", { float = true, pin = true, no_initial_focus = true, no_dim = true, border_size = 0, opacity = \"1 1\", tag = \"-default-opacity\" })" \
+      windowrule "float, class:^($(preview_app_id "$size"))\$"
+  done
+
+  # scrcpy has no way to set a Wayland app id, so its window is matched on the
+  # title we gave it instead.
+  hypr_rule \
+    "o.window({ class = \"^(scrcpy)\$\", title = \"^($PREVIEW_TITLE)\$\" }, { float = true, pin = true, no_initial_focus = true, no_dim = true, opacity = \"1 1\", tag = \"-default-opacity\" })" \
+    windowrule "float, title:^($PREVIEW_TITLE)\$"
+}
+
+preview_client() {
+  command -v hyprctl >/dev/null 2>&1 || return 1
+  hyprctl clients -j 2>/dev/null |
+    jq -cer --arg t "$PREVIEW_TITLE" 'first(.[] | select(.title == $t)) // empty' 2>/dev/null
+}
+
+preview_pid() {
+  local pid
+  [[ -r $PREVIEW_PID_FILE ]] || return 1
+  read -r pid <"$PREVIEW_PID_FILE" || return 1
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  [[ -r /proc/$pid/cmdline ]] || return 1
+  tr '\0' ' ' </proc/"$pid"/cmdline | grep -q -- "$PREVIEW_TITLE" || return 1
+  printf '%s\n' "$pid"
+}
+
+# True for either source: an mpv we launched, or scrcpy's own window on screen.
+preview_running() {
+  preview_pid >/dev/null 2>&1 || preview_client >/dev/null 2>&1
+}
+
+# The stream's own aspect ratio, so the preview is never letterboxed or
+# stretched. Falls back to 16:9 when the node cannot be read.
+preview_aspect() {
+  local width height
+  read -r width height < <(
+    v4l2-ctl --device "$DEVICE" --get-fmt-video 2>/dev/null |
+      sed -n 's/^[[:space:]]*Width\/Height[[:space:]]*:[[:space:]]*\([0-9]*\)\/\([0-9]*\).*/\1 \2/p' |
+      head -1
+  )
+  if [[ ${width:-0} =~ ^[0-9]+$ ]] && [[ ${height:-0} =~ ^[0-9]+$ ]] && ((width > 0 && height > 0)); then
+    printf '%s %s\n' "$width" "$height"
+  else
+    printf '16 9\n'
+  fi
+}
+
+# Presets scale from monitor height, so the preview occupies the same share of
+# a 1080p screen and a 4K one. Anchored bottom-right, matching where Omarchy's
+# own webcam overlay sits.
+preview_place() {
+  local size_name="$1"
+  command -v hyprctl >/dev/null 2>&1 || return 0
+
+  local client address
+  client=$(preview_client) || return 0
+  address=$(jq -r '.address' <<<"$client")
+  [[ -n $address ]] || return 0
+
+  local monitor_id
+  monitor_id=$(jq -r '.monitor' <<<"$client")
+  local monitor
+  monitor=$(hyprctl monitors -j 2>/dev/null |
+    jq -cer --argjson id "$monitor_id" 'first(.[] | select(.id == $id)) // empty' 2>/dev/null) || return 0
+
+  local mx my mw mh
+  read -r mx my mw mh < <(
+    jq -r '
+      . as $m
+      | (($m.transform // 0) % 2 == 1) as $rotated
+      | [ .x, .y,
+          (((if $rotated then .height else .width end) / .scale) | floor),
+          (((if $rotated then .width else .height end) / .scale) | floor) ]
+      | @tsv' <<<"$monitor"
+  )
+
+  local fraction
+  case "$size_name" in
+  small) fraction=18 ;;
+  large) fraction=34 ;;
+  *) fraction=25 ;;
+  esac
+
+  local aw ah
+  read -r aw ah < <(preview_aspect)
+
+  local height width
+  height=$((mh * fraction / 100))
+  width=$((height * aw / ah))
+
+  # A wide stream on a short screen can overflow; clamp to the space the
+  # margins leave rather than letting the preview run off the monitor.
+  local max_width=$((mw - 2 * PREVIEW_MARGIN))
+  if ((max_width > 0 && width > max_width)); then
+    width=$max_width
+    height=$((width * ah / aw))
+  fi
+
+  local x y
+  x=$((mx + mw - width - PREVIEW_MARGIN))
+  y=$((my + mh - height - PREVIEW_MARGIN))
+  ((x < mx + PREVIEW_MARGIN)) && x=$((mx + PREVIEW_MARGIN))
+  ((y < my + PREVIEW_MARGIN)) && y=$((my + PREVIEW_MARGIN))
+
+  local window="address:$address"
+  hypr_dispatch \
+    "hl.dsp.window.resize({ window = \"$window\", x = $width, y = $height })" \
+    resizewindowpixel "exact $width $height,$window"
+  hypr_dispatch \
+    "hl.dsp.window.move({ window = \"$window\", x = $x, y = $y })" \
+    movewindowpixel "exact $x $y,$window"
+}
+
+# Re-runs the current capture with or without scrcpy's window, reusing the
+# settings it was started with so toggling the preview never silently changes
+# the camera or resolution.
+restart_capture_with_window() {
+  local want_window="$1"
+  local meta='{}'
+  [[ -r $META_FILE ]] && meta=$(cat "$META_FILE")
+
+  local args=()
+  local value
+  value=$(jq -r '.serial // ""' <<<"$meta")
+  [[ -n $value ]] && args+=(-s "$value")
+  value=$(jq -r '.cameraId // ""' <<<"$meta")
+  if [[ -n $value ]]; then
+    args+=(--camera-id "$value")
+  else
+    value=$(jq -r '.facing // ""' <<<"$meta")
+    [[ -n $value ]] && args+=(--facing "$value")
+  fi
+  value=$(jq -r '.size // ""' <<<"$meta")
+  [[ -n $value ]] && args+=(--size "$value")
+  value=$(jq -r '.fps // ""' <<<"$meta")
+  [[ -n $value ]] && args+=(--fps "$value")
+  [[ $want_window == true ]] && args+=(--window)
+
+  cmd_stop >/dev/null
+  cmd_start ${args[@]+"${args[@]}"}
+}
+
+preview_start() {
+  local size_name
+  size_name=$(preview_size_name)
+
+  if preview_running; then
+    printf 'Preview is already open.\n'
+    return 0
+  fi
+
+  if [[ $PREVIEW_SOURCE == scrcpy ]]; then
+    capture_running || die "start a capture before opening the preview"
+    apply_preview_rules
+    restart_capture_with_window true
+    wait_for_preview
+    preview_place "$size_name"
+    return 0
+  fi
+
+  device_streaming || die "nothing is streaming yet — run 'omavcam start' first"
+  have mpv || die "mpv is not installed"
+
+  ensure_state_dir
+  apply_preview_rules
+
+  # Reading the node rather than the phone means the preview shows exactly the
+  # frames the meeting app receives — same crop, same orientation, same lag.
+  setsid mpv "av://v4l2:$DEVICE" \
+    --profile=low-latency --untimed --no-cache \
+    --title="$PREVIEW_TITLE" --wayland-app-id="$(preview_app_id "$size_name")" \
+    --no-border --no-audio --no-osc --osd-level=0 --really-quiet \
+    >/dev/null 2>&1 &
+  printf '%s\n' "$!" >"$PREVIEW_PID_FILE"
+
+  wait_for_preview
+  preview_place "$size_name"
+  printf 'Preview open.\n'
+}
+
+# The window has to be mapped before it can be positioned, or it is placed and
+# then re-placed by the compositor as it appears.
+wait_for_preview() {
+  local waited=0
+  while ((waited < 60)) && ! preview_client >/dev/null 2>&1; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+}
+
+preview_stop() {
+  if [[ $PREVIEW_SOURCE == scrcpy ]]; then
+    capture_running && restart_capture_with_window false
+    rm -f "$PREVIEW_PID_FILE"
+    return 0
+  fi
+
+  local pid
+  if pid=$(preview_pid); then
+    kill "$pid" 2>/dev/null || true
+  else
+    pkill -f "wayland-app-id=$PREVIEW_TITLE" 2>/dev/null || true
+  fi
+  rm -f "$PREVIEW_PID_FILE"
+  printf 'Preview closed.\n'
+}
+
+cmd_preview() {
+  local action="${1:-toggle}"
+  shift || true
+
+  have jq || die "jq is required"
+  ensure_state_dir
+
+  case "$action" in
+  on) preview_start ;;
+  off) preview_stop ;;
+  toggle)
+    if preview_running; then preview_stop; else preview_start; fi
+    ;;
+  status)
+    preview_running && printf 'open\n' || { printf 'closed\n'; return 1; }
+    ;;
+  resize)
+    local preset="${1:-reset}"
+    local current
+    current=$(preview_size_name)
+    case "$preset" in
+    small | medium | large) ;;
+    reset) preset=medium ;;
+    larger)
+      case "$current" in
+      small) preset=medium ;;
+      medium) preset=large ;;
+      *) preset=large ;;
+      esac
+      ;;
+    smaller)
+      case "$current" in
+      large) preset=medium ;;
+      medium) preset=small ;;
+      *) preset=small ;;
+      esac
+      ;;
+    *) die "preview resize takes small, medium, large, smaller, larger, or reset" ;;
+    esac
+    printf '%s\n' "$preset" >"$PREVIEW_SIZE_FILE"
+    # mpv's app id is fixed at launch and carries the preset name, so a resize
+    # only needs to move the existing window, not relaunch it.
+    preview_place "$preset"
+    printf '%s\n' "$preset"
+    ;;
+  *) die "unknown preview action: $action" ;;
+  esac
 }
 
 # ------------------------------------------------------------------ main ----
@@ -841,6 +1180,7 @@ main() {
   start) cmd_start "$@" ;;
   stop) cmd_stop "$@" ;;
   status) cmd_status "$@" ;;
+  preview) cmd_preview "$@" ;;
   help | --help | -h) usage ;;
   *)
     usage >&2
