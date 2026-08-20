@@ -472,17 +472,31 @@ load_module() {
 
 # --------------------------------------------------------------- capture ----
 
+# A symlink redirects every write; a directory owned by someone else means
+# someone else chooses what we read back out. Refuse both rather than carry on
+# into a state store we do not control.
+assert_private_dir() {
+  local path="$1"
+  [[ -L $path ]] && die "state directory is a symlink, refusing to use it: $path"
+  [[ -d $path ]] || die "could not create state directory: $path"
+  [[ -O $path ]] || die "state directory is not owned by you: $path"
+  chmod 700 "$path" 2>/dev/null || true
+}
+
 ensure_state_dir() {
-  mkdir -p -m 700 "$STATE_DIR" 2>/dev/null || true
+  local parent
+  parent=$(dirname "$STATE_DIR")
 
-  # A symlink here would redirect every write, and a directory owned by someone
-  # else means someone else chooses what we read back out of it. Refuse both
-  # rather than carry on into a state store we do not control.
-  [[ -L $STATE_DIR ]] && die "state directory is a symlink, refusing to use it: $STATE_DIR"
-  [[ -d $STATE_DIR ]] || die "could not create state directory: $STATE_DIR"
-  [[ -O $STATE_DIR ]] || die "state directory is not owned by you: $STATE_DIR"
+  # Created a level at a time, not with `mkdir -p -m`: with -p the mode applies
+  # only to the deepest directory, so the parent — the /tmp fallback, the very
+  # path being defended — would be left at whatever the umask allows.
+  if [[ ! -e $parent ]]; then
+    mkdir -m 700 "$parent" 2>/dev/null || true
+    assert_private_dir "$parent"
+  fi
 
-  chmod 700 "$STATE_DIR" 2>/dev/null || true
+  [[ -d $STATE_DIR ]] || mkdir -m 700 "$STATE_DIR" 2>/dev/null || true
+  assert_private_dir "$STATE_DIR"
 }
 
 # A pid file alone is not proof: pids get recycled, and a crashed scrcpy leaves
