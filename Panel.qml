@@ -68,6 +68,33 @@ Panel {
 
   readonly property var previewSizes: ["small", "medium", "large", "original"]
 
+  property bool originalWarningOpen: false
+
+  // Only warn when the stream is known to be larger than the screen it would
+  // open on. A measurement we could not take is not a reason to warn, and a
+  // stream that fits should apply without ceremony.
+  readonly property bool originalOverflows: {
+    var o = service.previewOriginal
+    return !!o && o.fitsScreen === false
+  }
+
+  readonly property string originalWarningText: {
+    var o = service.previewOriginal
+    if (!o) return ""
+    return "The preview would be " + o.width + "\u00d7" + o.height
+         + ", larger than this screen (" + o.screenWidth + "\u00d7" + o.screenHeight
+         + "). It will extend past the edges — drag it by its top-left corner."
+  }
+
+  // Applies a preview size, asking first when "original" would overflow.
+  function choosePreviewSize(size) {
+    if (size === "original" && originalOverflows) {
+      originalWarningOpen = true
+      return
+    }
+    service.setPreviewSize(size)
+  }
+
   function nextPreviewSize(step) {
     var index = previewSizes.indexOf(service.previewSize)
     if (index === -1) index = 1
@@ -143,17 +170,52 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      onCloseRequested: root.close()
+
+      // PanelKeyCatcher owns Keys.onPressed itself, so the dialog is driven
+      // through its signals rather than by intercepting raw key events — an
+      // instance-level Keys.onPressed here simply never fires.
+      onMoveRequested: function (dx, dy) {
+        if (root.originalWarningOpen && dx !== 0)
+          originalWarning.selectedIndex = originalWarning.selectedIndex === 0 ? 1 : 0
+      }
+      onActivateRequested: {
+        if (!root.originalWarningOpen) return
+        if (originalWarning.selectedIndex === 0) originalWarning.canceled()
+        else originalWarning.confirmed()
+      }
+      onCloseRequested: {
+        if (root.originalWarningOpen) root.originalWarningOpen = false
+        else root.close()
+      }
       onTabRequested: function (direction) { root.switchPanel(direction) }
       onTextKey: function (t) {
+        // The dialog is modal: nothing behind it should act on a keystroke.
+        if (root.originalWarningOpen) return
         var key = String(t).toLowerCase()
         if (key === "s") service.toggle()
         else if (key === "r") { service.refresh(); service.refreshCameras() }
         else if (key === "f") root.chooseFacing("front")
         else if (key === "b") root.chooseFacing("back")
         else if (key === "p") service.togglePreview()
-        else if (key === "+" || key === "=") service.setPreviewSize(nextPreviewSize(1))
-        else if (key === "-" || key === "_") service.setPreviewSize(nextPreviewSize(-1))
+        else if (key === "+" || key === "=") root.choosePreviewSize(nextPreviewSize(1))
+        else if (key === "-" || key === "_") root.choosePreviewSize(nextPreviewSize(-1))
+      }
+
+      ConfirmDialog {
+        id: originalWarning
+        anchors.fill: parent
+        z: 10
+        opened: root.originalWarningOpen
+        message: root.originalWarningText
+        confirmText: "Show anyway"
+        cancelText: "Cancel"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        onCanceled: root.originalWarningOpen = false
+        onConfirmed: {
+          root.originalWarningOpen = false
+          service.setPreviewSize("original")
+        }
       }
 
       Column {
@@ -418,7 +480,7 @@ Panel {
             value: service.previewSize
             foreground: root.foreground
             fontFamily: root.fontFamily
-            onChanged: function (value) { service.setPreviewSize(value) }
+            onChanged: function (value) { root.choosePreviewSize(value) }
           }
 
           ButtonGroup {
