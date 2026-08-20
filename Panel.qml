@@ -23,15 +23,26 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  // The video-camera glyph Omarchy itself uses for screen recording, so it is
-  // known to render in the bar font. State is carried by color, not by glyph.
+  // nf-md-webcam, from the same Material Design set every neighbouring widget
+  // draws from. That matters for more than taste: OpticalGlyph renders at a
+  // fixed point size and only corrects centring — it does not scale glyphs to a
+  // common size — so a glyph's apparent size is whatever the font draws. In
+  // JetBrainsMono Nerd Font the Font Awesome camera used here previously inks
+  // 91 units tall against 109 for the monitor and bluetooth icons beside it,
+  // which is why it read as undersized in the bar. This one inks 109, matching
+  // them. State is carried by color, not by glyph.
   //
   // Written as an escape on purpose: as a literal character it is invisible in
   // a diff and survives nothing — an editor, a rewrite, or a stray encoding
   // step can drop it, leaving an empty string. BarIconButton hides a button
   // with no text, so losing it removes the widget from the bar silently, with
   // no error anywhere.
-  readonly property string icon: "\uf03d"
+  //
+  // Built from its code point rather than written as a character or a \u
+  // escape: U+F05A0 sits above the BMP, so a \u escape cannot express it (those
+  // take exactly four hex digits, and "\uf05a0" is the wrong glyph followed by
+  // a stray "0").
+  readonly property string icon: String.fromCodePoint(0xf05a0)
 
   readonly property color barIconColor: {
     if (service.active) return barForeground
