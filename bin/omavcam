@@ -27,6 +27,14 @@ readonly REQUIRED_PACKAGES=(scrcpy android-tools v4l2loopback-dkms)
 # meeting app is reading.
 readonly MAX_OPENERS=10
 
+# Capture state lives in the runtime dir so a reboot cannot leave a stale pid
+# behind claiming a capture is running.
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omavcam"
+readonly STATE_DIR
+readonly PID_FILE="$STATE_DIR/capture.pid"
+readonly META_FILE="$STATE_DIR/capture.json"
+readonly LOG_FILE="$STATE_DIR/capture.log"
+
 usage() {
   cat <<'USAGE'
 Usage: omavcam <command> [options]
@@ -34,7 +42,20 @@ Usage: omavcam <command> [options]
 Commands:
   doctor [--json]   Report whether the system can run omavcam
   setup [--yes]     Install dependencies and configure the virtual camera
+  devices [--json]  List Android devices adb can see
+  cameras [--json]  List the cameras on the phone
+  start [options]   Start streaming the phone camera to the virtual camera
+  stop              Stop streaming
+  status [--json]   Report whether a capture is running
   help              Show this message
+
+Start options:
+  -s, --serial <serial>   Which phone to use, when more than one is attached
+      --facing <f>        front, back, or external (default: front)
+      --camera-id <id>    Explicit camera id; overrides --facing
+      --size <WxH>        Capture resolution, e.g. 1920x1080
+      --fps <n>           Capture frame rate
+      --v4l2-buffer <ms>  Buffering, to smooth a stuttering stream
 
 Environment:
   OMAVCAM_VIDEO_NR  Which /dev/videoN to claim (default: 42)
@@ -407,6 +428,371 @@ load_module() {
   return 1
 }
 
+# --------------------------------------------------------------- capture ----
+
+ensure_state_dir() {
+  mkdir -p "$STATE_DIR"
+}
+
+# A pid file alone is not proof: pids get recycled, and a crashed scrcpy leaves
+# the file behind. Confirm the process is alive and is actually our capture by
+# looking for our own sink in its command line.
+capture_pid() {
+  local pid
+  [[ -r $PID_FILE ]] || return 1
+  read -r pid <"$PID_FILE" || return 1
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  [[ -r /proc/$pid/cmdline ]] || return 1
+  tr '\0' ' ' </proc/"$pid"/cmdline | grep -q -- "--v4l2-sink=$DEVICE" || return 1
+  printf '%s\n' "$pid"
+}
+
+capture_running() {
+  capture_pid >/dev/null 2>&1
+}
+
+clear_state() {
+  rm -f "$PID_FILE" "$META_FILE"
+}
+
+# With exclusive_caps=1 the node only advertises Video Capture while something
+# is writing to it, so this is a direct answer to "is a real stream flowing",
+# not merely "is a process alive". Same check omarchy-capture-webcam-list uses.
+device_streaming() {
+  [[ -e $DEVICE ]] || return 1
+  v4l2-ctl --device "$DEVICE" --info 2>/dev/null | awk '
+    /^[[:space:]]*Device Caps[[:space:]]*:/ { inspect = 1; next }
+    inspect && /^[[:space:]]*Video Capture/ { found = 1 }
+    END { exit !found }
+  '
+}
+
+# --------------------------------------------------------------- devices ----
+
+# `adb devices -l` prints a header line, then one device per line:
+#   ABC123   device product:panther model:Pixel_7 device:panther transport_id:2
+# States other than "device" matter to the panel: "unauthorized" means the
+# phone is waiting for the user to accept the debugging prompt.
+adb_devices_json() {
+  have adb || {
+    printf '[]\n'
+    return 0
+  }
+
+  adb devices -l 2>/dev/null | tail -n +2 | awk '
+    NF >= 2 {
+      serial = $1
+      state = $2
+      model = ""
+      for (i = 3; i <= NF; i++)
+        if ($i ~ /^model:/) { model = substr($i, 7); gsub(/_/, " ", model) }
+      printf "%s\t%s\t%s\n", serial, state, model
+    }
+  ' | jq -R -s '
+    split("\n")
+    | map(select(length > 0) | split("\t"))
+    | map({serial: .[0], state: .[1], model: (.[2] // ""), ready: (.[1] == "device")})
+  '
+}
+
+cmd_devices() {
+  local as_json=false
+  while (($# > 0)); do
+    case "$1" in
+    --json) as_json=true ;;
+    *) die "unknown option for devices: $1" ;;
+    esac
+    shift
+  done
+
+  have jq || die "jq is required"
+  have adb || die "adb is not installed — run 'omavcam setup'"
+
+  local devices
+  devices=$(adb_devices_json)
+
+  if [[ $as_json == true ]]; then
+    printf '%s\n' "$devices"
+    return 0
+  fi
+
+  if [[ $(jq 'length' <<<"$devices") -eq 0 ]]; then
+    printf 'No devices. Plug the phone in and enable USB debugging.\n'
+    return 1
+  fi
+
+  jq -r '.[] | "  \(.serial)\t\(.state)\t\(.model)"' <<<"$devices"
+}
+
+# Resolves which phone to talk to. With exactly one ready device the serial is
+# implied; with several, the caller has to say which, since silently picking one
+# would send the stream from whichever phone happened to enumerate first.
+resolve_serial() {
+  local requested="${1:-}" devices count
+  devices=$(adb_devices_json)
+
+  if [[ -n $requested ]]; then
+    jq -e --arg s "$requested" 'any(.[]; .serial == $s and .ready)' <<<"$devices" >/dev/null ||
+      die "device $requested is not connected and ready"
+    printf '%s\n' "$requested"
+    return 0
+  fi
+
+  count=$(jq '[.[] | select(.ready)] | length' <<<"$devices")
+  case "$count" in
+  0)
+    if [[ $(jq 'any(.[]; .state == "unauthorized")' <<<"$devices") == true ]]; then
+      die "phone is unauthorized — accept the USB debugging prompt on its screen"
+    fi
+    die "no phone connected — plug it in and enable USB debugging"
+    ;;
+  1) jq -r '[.[] | select(.ready)][0].serial' <<<"$devices" ;;
+  *) die "$count phones connected — pass --serial to choose one" ;;
+  esac
+}
+
+# --------------------------------------------------------------- cameras ----
+
+# scrcpy's flag set moves between releases, so ask the binary what it accepts
+# rather than assuming. Keeps a new scrcpy from breaking capture over a flag
+# that was renamed.
+scrcpy_supports() {
+  scrcpy --help 2>&1 | grep -q -- "$1"
+}
+
+cmd_cameras() {
+  local as_json=false serial=""
+  while (($# > 0)); do
+    case "$1" in
+    --json) as_json=true ;;
+    -s | --serial)
+      serial="${2:-}"
+      shift
+      ;;
+    *) die "unknown option for cameras: $1" ;;
+    esac
+    shift
+  done
+
+  have jq || die "jq is required"
+  have scrcpy || die "scrcpy is not installed — run 'omavcam setup'"
+
+  serial=$(resolve_serial "$serial")
+
+  local raw
+  raw=$(scrcpy -s "$serial" --list-cameras 2>&1 || true)
+
+  if [[ $as_json == false ]]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+
+  # Lines look like:
+  #     --camera-id=0    (back, 4000x3000, fps=[30, 60])
+  printf '%s\n' "$raw" | sed -n 's/.*--camera-id=\([^ ]*\)[[:space:]]*(\(.*\))[[:space:]]*$/\1\t\2/p' |
+    jq -R -s '
+      split("\n")
+      | map(select(length > 0) | split("\t"))
+      | map({
+          id: .[0],
+          facing: (.[1] | split(",")[0] | ascii_downcase | gsub("^\\s+|\\s+$"; "")),
+          description: .[1]
+        })
+    '
+}
+
+# ----------------------------------------------------------------- start ----
+
+cmd_start() {
+  local serial="" facing="front" camera_id="" size="" fps="" v4l2_buffer=""
+  while (($# > 0)); do
+    case "$1" in
+    -s | --serial) serial="${2:?--serial needs a value}" && shift ;;
+    --facing) facing="${2:?--facing needs a value}" && shift ;;
+    --camera-id) camera_id="${2:?--camera-id needs a value}" && shift ;;
+    --size) size="${2:?--size needs a value}" && shift ;;
+    --fps) fps="${2:?--fps needs a value}" && shift ;;
+    --v4l2-buffer) v4l2_buffer="${2:?--v4l2-buffer needs a value}" && shift ;;
+    *) die "unknown option for start: $1" ;;
+    esac
+    shift
+  done
+
+  case "$facing" in
+  front | back | external) ;;
+  *) die "--facing must be front, back, or external" ;;
+  esac
+
+  have jq || die "jq is required"
+  have scrcpy || die "scrcpy is not installed — run 'omavcam setup'"
+
+  inspect
+  if [[ $(blocked_count) -gt 0 ]]; then
+    doctor_human >&2
+    die "system is not ready to capture"
+  fi
+
+  if capture_running; then
+    die "a capture is already running — run 'omavcam stop' first"
+  fi
+
+  serial=$(resolve_serial "$serial")
+  ensure_state_dir
+  clear_state
+
+  local args=(
+    -s "$serial"
+    --video-source=camera
+    "--v4l2-sink=$DEVICE"
+    --no-audio
+  )
+
+  # Explicit id wins: --camera-facing and --camera-id are mutually exclusive in
+  # scrcpy, and passing both is an error rather than a preference.
+  if [[ -n $camera_id ]]; then
+    args+=("--camera-id=$camera_id")
+  else
+    args+=("--camera-facing=$facing")
+  fi
+
+  [[ -n $size ]] && args+=("--camera-size=$size")
+  [[ -n $fps ]] && args+=("--camera-fps=$fps")
+  [[ -n $v4l2_buffer ]] && args+=("--v4l2-buffer=$v4l2_buffer")
+
+  # Headless by default. --no-window is the clean suppression where scrcpy has
+  # it; --no-video-playback is the documented v4l2 companion and covers the
+  # releases that lack it.
+  if scrcpy_supports --no-window; then
+    args+=(--no-window)
+  else
+    args+=(--no-video-playback)
+  fi
+
+  printf 'Starting capture from %s on %s\n' "$serial" "$DEVICE"
+
+  setsid scrcpy "${args[@]}" >"$LOG_FILE" 2>&1 &
+  local pid=$!
+  printf '%s\n' "$pid" >"$PID_FILE"
+
+  jq -n \
+    --arg serial "$serial" \
+    --arg mode camera \
+    --arg device "$DEVICE" \
+    --arg facing "$([[ -n $camera_id ]] && printf '' || printf '%s' "$facing")" \
+    --arg cameraId "$camera_id" \
+    --arg size "$size" \
+    --arg fps "$fps" \
+    --argjson startedAt "$(date +%s)" \
+    '{serial: $serial, mode: $mode, device: $device, facing: $facing,
+      cameraId: $cameraId, size: $size, fps: $fps, startedAt: $startedAt}' \
+    >"$META_FILE"
+
+  # scrcpy has to push and start its server on the phone before a frame ever
+  # reaches the sink, so a plain "did the process survive" check would report
+  # success long before the camera is usable. Wait for the node to actually
+  # advertise capture instead.
+  local waited=0
+  while ((waited < 100)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      printf 'scrcpy exited before the stream started:\n\n' >&2
+      tail -n 20 "$LOG_FILE" >&2
+      clear_state
+      return 1
+    fi
+    if device_streaming; then
+      printf 'Streaming to %s as "%s".\n' "$DEVICE" "$CARD_LABEL"
+      return 0
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  printf 'scrcpy is running but %s is not advertising capture yet.\n' "$DEVICE" >&2
+  printf 'Recent output:\n\n' >&2
+  tail -n 20 "$LOG_FILE" >&2
+  return 1
+}
+
+# ------------------------------------------------------------------ stop ----
+
+cmd_stop() {
+  (($# == 0)) || die "stop takes no options"
+
+  local pid
+  if ! pid=$(capture_pid); then
+    clear_state
+    printf 'No capture running.\n'
+    return 0
+  fi
+
+  printf 'Stopping capture (pid %s)\n' "$pid"
+  kill "$pid" 2>/dev/null || true
+
+  # scrcpy needs a moment to tear its server down on the phone; killing it
+  # outright can leave the process on the device behind.
+  local waited=0
+  while ((waited < 50)) && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+
+  if kill -0 "$pid" 2>/dev/null; then
+    printf 'scrcpy did not exit; killing it.\n' >&2
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+
+  clear_state
+}
+
+# ---------------------------------------------------------------- status ----
+
+cmd_status() {
+  local as_json=false
+  while (($# > 0)); do
+    case "$1" in
+    --json) as_json=true ;;
+    *) die "unknown option for status: $1" ;;
+    esac
+    shift
+  done
+
+  have jq || die "jq is required"
+
+  local pid running=false streaming=false meta='{}'
+  if pid=$(capture_pid); then
+    running=true
+    [[ -r $META_FILE ]] && meta=$(cat "$META_FILE")
+  else
+    pid=""
+    # A pid file with no live process behind it is stale; drop it so the next
+    # start is not refused by a capture that is not there.
+    clear_state
+  fi
+  device_streaming && streaming=true
+
+  if [[ $as_json == true ]]; then
+    jq -n \
+      --argjson running "$running" \
+      --argjson streaming "$streaming" \
+      --arg pid "$pid" \
+      --argjson meta "$meta" \
+      '{running: $running, streaming: $streaming, pid: $pid, capture: $meta}
+       | .uptimeSec = (if $meta.startedAt then (now | floor) - $meta.startedAt else null end)'
+    return 0
+  fi
+
+  if [[ $running == false ]]; then
+    printf 'Not capturing.\n'
+    return 1
+  fi
+
+  printf 'Capturing from %s\n' "$(jq -r '.serial // "?"' <<<"$meta")"
+  printf '  device   %s\n' "$(jq -r '.device // "?"' <<<"$meta")"
+  printf '  camera   %s\n' "$(jq -r 'if .cameraId != "" then "id " + .cameraId else .facing end' <<<"$meta")"
+  printf '  pid      %s\n' "$pid"
+  printf '  live     %s\n' "$streaming"
+}
+
 # ------------------------------------------------------------------ main ----
 
 main() {
@@ -416,6 +802,11 @@ main() {
   case "$command" in
   doctor) cmd_doctor "$@" ;;
   setup) cmd_setup "$@" ;;
+  devices) cmd_devices "$@" ;;
+  cameras) cmd_cameras "$@" ;;
+  start) cmd_start "$@" ;;
+  stop) cmd_stop "$@" ;;
+  status) cmd_status "$@" ;;
   help | --help | -h) usage ;;
   *)
     usage >&2
