@@ -59,9 +59,10 @@ Commands:
   devices [--json]  List Android devices adb can see
   cameras [--json]  List the cameras on the phone
   start [options]   Start streaming the phone camera to the virtual camera
+  restart [options] Apply new settings to a running capture
   stop              Stop streaming
   status [--json]   Report whether a capture is running
-  preview <action>  on, off, toggle, or resize <preset>
+  preview <action>  on, off, toggle, reopen, or resize <preset>
   help              Show this message
 
 Start options:
@@ -781,11 +782,10 @@ cmd_start() {
 cmd_stop() {
   (($# == 0)) || die "stop takes no options"
 
-  # A loopback preview reads the node the capture feeds; leaving it open after
-  # the stream ends strands an mpv showing a frozen last frame.
-  if [[ $PREVIEW_SOURCE != scrcpy ]] && preview_running; then
-    preview_stop >/dev/null 2>&1 || true
-  fi
+  # A reader left attached strands an mpv showing a frozen last frame, and pins
+  # the node's format for whatever starts next. Neither depends on which source
+  # is configured, so neither does this.
+  loopback_preview_stop
 
   local pid
   if ! pid=$(capture_pid); then
@@ -973,6 +973,35 @@ preview_scan_pid() {
 # True for either source: an mpv we launched, or scrcpy's own window on screen.
 preview_running() {
   preview_pid >/dev/null 2>&1 || preview_client >/dev/null 2>&1
+}
+
+# An mpv preview specifically, regardless of which source is configured.
+#
+# This matters for cleanup rather than display: any reader attached to the node
+# pins its format, so v4l2loopback cannot shrink it for the next capture. Leave
+# one open across a restart and scrcpy streams the new camera into the old
+# camera's geometry — the capture looks healthy, the picture is wrong. So a
+# reader is always torn down before a restart, whatever previewSource says;
+# the setting decides what gets opened, never what gets cleaned up.
+loopback_preview_pid() {
+  preview_pid 2>/dev/null || preview_scan_pid 2>/dev/null
+}
+
+loopback_preview_stop() {
+  local pid
+  pid=$(loopback_preview_pid || true)
+  [[ -n $pid ]] || return 0
+
+  kill "$pid" 2>/dev/null || true
+  local waited=0
+  while ((waited < 20)) && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PREVIEW_PID_FILE"
 }
 
 # The stream's own aspect ratio, so the preview is never letterboxed or
@@ -1191,6 +1220,12 @@ cmd_preview() {
   toggle)
     if preview_running; then preview_stop; else preview_start; fi
     ;;
+  reopen)
+    # Switching source cannot be done in place: the two sources are different
+    # windows owned by different processes.
+    if preview_running; then preview_stop >/dev/null; fi
+    preview_start
+    ;;
   status)
     if preview_running; then
       printf 'open\n'
@@ -1232,6 +1267,137 @@ cmd_preview() {
   esac
 }
 
+# --------------------------------------------------------------- restart ----
+
+# scrcpy fixes the camera, resolution and frame rate when it launches — none of
+# them can be changed on a live stream. Applying a new setting therefore means
+# restarting the capture, and restart exists so that callers do not have to
+# reconstruct the settings the stream was already using.
+#
+# Flags left out are inherited from the running capture; a flag given with an
+# empty value clears it. That distinction is why this cannot simply be
+# "stop; start": a panel that omits --size means "leave it alone", while one
+# that sends --size "" means "back to the camera default".
+cmd_restart() {
+  local set_serial=false set_facing=false set_camera=false set_size=false set_fps=false
+  local serial="" facing="" camera_id="" size="" fps=""
+  local want_window=""
+
+  while (($# > 0)); do
+    case "$1" in
+    -s | --serial)
+      (($# >= 2)) || die "--serial needs a value"
+      serial="$2" set_serial=true
+      shift
+      ;;
+    --facing)
+      (($# >= 2)) || die "--facing needs a value"
+      facing="$2" set_facing=true
+      shift
+      ;;
+    --camera-id)
+      (($# >= 2)) || die "--camera-id needs a value"
+      camera_id="$2" set_camera=true
+      shift
+      ;;
+    --size)
+      (($# >= 2)) || die "--size needs a value"
+      size="$2" set_size=true
+      shift
+      ;;
+    --fps)
+      (($# >= 2)) || die "--fps needs a value"
+      fps="$2" set_fps=true
+      shift
+      ;;
+    --window) want_window=true ;;
+    --no-window) want_window=false ;;
+    *) die "unknown option for restart: $1" ;;
+    esac
+    shift
+  done
+
+  have jq || die "jq is required"
+
+  local meta='{}'
+  [[ -r $META_FILE ]] && meta=$(cat "$META_FILE")
+
+  [[ $set_serial == true ]] || serial=$(jq -r '.serial // ""' <<<"$meta")
+  [[ $set_size == true ]] || size=$(jq -r '.size // ""' <<<"$meta")
+  [[ $set_fps == true ]] || fps=$(jq -r '.fps // ""' <<<"$meta")
+  [[ -n $want_window ]] || want_window=$(jq -r 'if .window == true then "true" else "false" end' <<<"$meta")
+
+  # Facing and camera id are mutually exclusive in scrcpy, so setting either one
+  # explicitly retires the other rather than leaving a stale value to win.
+  if [[ $set_camera == true ]]; then
+    facing=""
+  elif [[ $set_facing == true ]]; then
+    camera_id=""
+  else
+    camera_id=$(jq -r '.cameraId // ""' <<<"$meta")
+    facing=$(jq -r '.facing // ""' <<<"$meta")
+  fi
+
+  # A loopback preview reads the node the capture feeds, so it dies the moment
+  # the stream stops. Reopen it afterwards, or applying a setting would silently
+  # close the window the user was watching.
+  local preview_was_open=false
+  if [[ -n $(loopback_preview_pid || true) ]]; then
+    preview_was_open=true
+  fi
+
+  loopback_preview_stop
+  capture_running && cmd_stop >/dev/null
+
+  local args=()
+  [[ -n $serial ]] && args+=(-s "$serial")
+  if [[ -n $camera_id ]]; then
+    args+=(--camera-id "$camera_id")
+  elif [[ -n $facing ]]; then
+    args+=(--facing "$facing")
+  fi
+  [[ -n $size ]] && args+=(--size "$size")
+  [[ -n $fps ]] && args+=(--fps "$fps")
+  [[ $want_window == true ]] && args+=(--window)
+
+  local started=true
+  cmd_start ${args[@]+"${args[@]}"} || started=false
+
+  # A resolution belongs to one camera: switch cameras and the old size may not
+  # exist on the new one, which scrcpy rejects outright. Refusing to come back
+  # at all would be the worst outcome — the user changed a setting and lost
+  # their camera mid-call — so fall back to the camera's own default and say so.
+  if [[ $started == false && -n $size ]]; then
+    printf 'That resolution is not available on this camera; using its default.\n' >&2
+    local retry=()
+    local arg skip=false
+    for arg in ${args[@]+"${args[@]}"}; do
+      if [[ $skip == true ]]; then
+        skip=false
+        continue
+      fi
+      if [[ $arg == --size ]]; then
+        skip=true
+        continue
+      fi
+      retry+=("$arg")
+    done
+    if cmd_start ${retry[@]+"${retry[@]}"}; then
+      started=true
+    else
+      started=false
+    fi
+  fi
+
+  if [[ $preview_was_open == true ]]; then
+    preview_start >/dev/null 2>&1 || true
+  fi
+
+  # Report the capture's fate, not the preview's — a masked failure here told
+  # the panel everything was fine while the stream was down.
+  [[ $started == true ]]
+}
+
 # ------------------------------------------------------------------ main ----
 
 main() {
@@ -1244,6 +1410,7 @@ main() {
   devices) cmd_devices "$@" ;;
   cameras) cmd_cameras "$@" ;;
   start) cmd_start "$@" ;;
+  restart) cmd_restart "$@" ;;
   stop) cmd_stop "$@" ;;
   status) cmd_status "$@" ;;
   preview) cmd_preview "$@" ;;
