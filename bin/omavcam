@@ -1,0 +1,427 @@
+#!/usr/bin/env bash
+
+# omavcam — use an Android phone as a virtual webcam.
+#
+# Every system interaction in the plugin lives here. The QML front end only
+# reads this script's JSON and calls its subcommands, so the whole feature is
+# testable from a terminal and a broken shell plugin can never strand a
+# capture process.
+
+set -euo pipefail
+
+readonly MODULE="v4l2loopback"
+readonly CARD_LABEL="omavcam"
+readonly MODPROBE_CONF="/etc/modprobe.d/omavcam.conf"
+readonly MODULES_LOAD_CONF="/etc/modules-load.d/omavcam.conf"
+
+# Which /dev/videoN the virtual camera claims. Overridable for the rare machine
+# where 42 is already taken by another loopback consumer.
+VIDEO_NR="${OMAVCAM_VIDEO_NR:-42}"
+readonly VIDEO_NR
+readonly DEVICE="/dev/video${VIDEO_NR}"
+
+# scrcpy captures, adb finds the phone, v4l2loopback-dkms backs the node.
+readonly REQUIRED_PACKAGES=(scrcpy android-tools v4l2loopback-dkms)
+
+# max_openers above 1 is what lets the preview window read the same node the
+# meeting app is reading.
+readonly MAX_OPENERS=10
+
+usage() {
+  cat <<'USAGE'
+Usage: omavcam <command> [options]
+
+Commands:
+  doctor [--json]   Report whether the system can run omavcam
+  setup [--yes]     Install dependencies and configure the virtual camera
+  help              Show this message
+
+Environment:
+  OMAVCAM_VIDEO_NR  Which /dev/videoN to claim (default: 42)
+USAGE
+}
+
+die() {
+  printf 'omavcam: %s\n' "$*" >&2
+  exit 1
+}
+
+have() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+pkg_installed() {
+  pacman -Q "$1" >/dev/null 2>&1
+}
+
+# The headers package matching the running kernel, which DKMS needs to build
+# v4l2loopback. Arch records the kernel's pkgbase next to its modules, so this
+# resolves correctly on linux, linux-lts, linux-zen, and friends.
+kernel_headers_package() {
+  local pkgbase_file pkgbase
+  pkgbase_file="/usr/lib/modules/$(uname -r)/pkgbase"
+  if [[ -r $pkgbase_file ]] && read -r pkgbase <"$pkgbase_file" && [[ -n $pkgbase ]]; then
+    printf '%s-headers\n' "$pkgbase"
+  else
+    printf 'linux-headers\n'
+  fi
+}
+
+module_loaded() {
+  [[ -d /sys/module/$MODULE ]]
+}
+
+# Available to modprobe — true once the DKMS build has installed it, whether or
+# not it is currently loaded.
+module_available() {
+  modinfo "$MODULE" >/dev/null 2>&1
+}
+
+# Module parameters are readable only while the module is loaded. video_nr is an
+# array parameter, so it reads back as a comma-separated list.
+module_param() {
+  local path="/sys/module/$MODULE/parameters/$1"
+  [[ -r $path ]] || return 1
+  tr -d '\n' <"$path"
+}
+
+# The card label the kernel reports for our node, which is what shows up in an
+# application's camera picker. Empty when the node does not exist.
+device_card_label() {
+  [[ -e $DEVICE ]] || return 1
+  v4l2-ctl --device "$DEVICE" --info 2>/dev/null |
+    sed -n 's/^[[:space:]]*Card type[[:space:]]*:[[:space:]]*//p' |
+    head -1
+}
+
+conf_content_modprobe() {
+  cat <<EOF
+# Managed by omavcam — https://github.com/Sphiment/omavcam
+#
+# exclusive_caps=1 makes the node advertise capture capability only while
+# something is writing to it, so "omavcam" appears in camera pickers exactly
+# when it is streaming instead of haunting every dropdown.
+options $MODULE video_nr=$VIDEO_NR card_label="$CARD_LABEL" exclusive_caps=1 max_openers=$MAX_OPENERS
+EOF
+}
+
+conf_content_modules_load() {
+  cat <<EOF
+# Managed by omavcam — https://github.com/Sphiment/omavcam
+$MODULE
+EOF
+}
+
+conf_matches() {
+  local path="$1" want="$2"
+  [[ -r $path ]] && [[ "$(cat "$path")" == "$want" ]]
+}
+
+# ---------------------------------------------------------------- doctor ----
+
+# Collects the whole picture once, so the human and JSON renderings can never
+# disagree about what was observed.
+declare -a MISSING_PACKAGES=()
+declare -a ISSUES=()
+STATE_MODULE_AVAILABLE=false
+STATE_MODULE_LOADED=false
+STATE_DEVICE_PRESENT=false
+STATE_DEVICE_LABEL=""
+STATE_LABEL_MATCHES=false
+STATE_PERSISTED=false
+STATE_HEADERS_PACKAGE=""
+STATE_HEADERS_INSTALLED=false
+
+# code|severity|message — severity is "blocked" when omavcam cannot capture at
+# all, "warn" when it works but something will not survive a reboot.
+add_issue() {
+  ISSUES+=("$1|$2|$3")
+}
+
+inspect() {
+  local pkg
+  for pkg in "${REQUIRED_PACKAGES[@]}"; do
+    pkg_installed "$pkg" || MISSING_PACKAGES+=("$pkg")
+  done
+
+  STATE_HEADERS_PACKAGE="$(kernel_headers_package)"
+  pkg_installed "$STATE_HEADERS_PACKAGE" && STATE_HEADERS_INSTALLED=true
+
+  module_available && STATE_MODULE_AVAILABLE=true
+  module_loaded && STATE_MODULE_LOADED=true
+
+  if [[ -e $DEVICE ]]; then
+    STATE_DEVICE_PRESENT=true
+    STATE_DEVICE_LABEL="$(device_card_label || true)"
+    [[ $STATE_DEVICE_LABEL == "$CARD_LABEL" ]] && STATE_LABEL_MATCHES=true
+  fi
+
+  if conf_matches "$MODPROBE_CONF" "$(conf_content_modprobe)" &&
+    conf_matches "$MODULES_LOAD_CONF" "$(conf_content_modules_load)"; then
+    STATE_PERSISTED=true
+  fi
+
+  if ((${#MISSING_PACKAGES[@]} > 0)); then
+    add_issue missing-packages blocked \
+      "Missing packages: ${MISSING_PACKAGES[*]}"
+  fi
+
+  if [[ $STATE_HEADERS_INSTALLED == false ]]; then
+    add_issue missing-headers blocked \
+      "$STATE_HEADERS_PACKAGE is not installed, so DKMS cannot build $MODULE for the running kernel"
+  fi
+
+  if [[ ${#MISSING_PACKAGES[@]} -eq 0 && $STATE_MODULE_AVAILABLE == false ]]; then
+    add_issue module-unavailable blocked \
+      "$MODULE is installed but not built for the running kernel — check 'dkms status'"
+  fi
+
+  if [[ $STATE_MODULE_AVAILABLE == true && $STATE_MODULE_LOADED == false ]]; then
+    add_issue module-not-loaded blocked "$MODULE is not loaded"
+  fi
+
+  # Loaded, but the node we want is not ours. Another consumer (OBS virtual
+  # camera, v4l2-relayd) got there first with different parameters. Never
+  # rmmod out from under them; say so and let the user pick a different node.
+  if [[ $STATE_MODULE_LOADED == true && $STATE_DEVICE_PRESENT == false ]]; then
+    add_issue device-missing blocked \
+      "$MODULE is loaded but $DEVICE does not exist — it was loaded without omavcam's parameters"
+  elif [[ $STATE_DEVICE_PRESENT == true && $STATE_LABEL_MATCHES == false ]]; then
+    add_issue device-conflict blocked \
+      "$DEVICE belongs to \"${STATE_DEVICE_LABEL:-unknown}\", not omavcam — set OMAVCAM_VIDEO_NR to a free node"
+  fi
+
+  if [[ $STATE_PERSISTED == false ]]; then
+    add_issue not-persisted warn \
+      "The virtual camera is not configured to come back after a reboot"
+  fi
+}
+
+blocked_count() {
+  local issue count=0
+  for issue in ${ISSUES[@]+"${ISSUES[@]}"}; do
+    if [[ ${issue#*|} == blocked\|* ]]; then
+      count=$((count + 1))
+    fi
+  done
+  printf '%s\n' "$count"
+}
+
+doctor_json() {
+  local issues_json packages_json missing_json
+  issues_json=$(
+    for issue in ${ISSUES[@]+"${ISSUES[@]}"}; do
+      IFS='|' read -r code severity message <<<"$issue"
+      jq -n --arg c "$code" --arg s "$severity" --arg m "$message" \
+        '{code: $c, severity: $s, message: $m}'
+    done | jq -s '.'
+  )
+
+  packages_json=$(
+    for pkg in "${REQUIRED_PACKAGES[@]}"; do
+      jq -n --arg n "$pkg" --argjson i "$(pkg_installed "$pkg" && echo true || echo false)" \
+        '{name: $n, installed: $i}'
+    done | jq -s '.'
+  )
+
+  missing_json=$(printf '%s\n' ${MISSING_PACKAGES[@]+"${MISSING_PACKAGES[@]}"} |
+    jq -R 'select(length > 0)' | jq -s '.')
+
+  jq -n \
+    --argjson ok "$([[ $(blocked_count) -eq 0 ]] && echo true || echo false)" \
+    --argjson packages "$packages_json" \
+    --argjson missingPackages "$missing_json" \
+    --arg headersPackage "$STATE_HEADERS_PACKAGE" \
+    --argjson headersInstalled "$STATE_HEADERS_INSTALLED" \
+    --argjson moduleAvailable "$STATE_MODULE_AVAILABLE" \
+    --argjson moduleLoaded "$STATE_MODULE_LOADED" \
+    --arg device "$DEVICE" \
+    --argjson devicePresent "$STATE_DEVICE_PRESENT" \
+    --arg deviceLabel "$STATE_DEVICE_LABEL" \
+    --argjson persisted "$STATE_PERSISTED" \
+    --argjson issues "$issues_json" \
+    '{
+      ok: $ok,
+      packages: $packages,
+      missingPackages: $missingPackages,
+      kernel: {headersPackage: $headersPackage, headersInstalled: $headersInstalled},
+      module: {available: $moduleAvailable, loaded: $moduleLoaded},
+      device: {path: $device, present: $devicePresent, label: $deviceLabel},
+      persisted: $persisted,
+      issues: $issues
+    }'
+}
+
+doctor_human() {
+  local mark
+  printf 'omavcam doctor\n\n'
+
+  for pkg in "${REQUIRED_PACKAGES[@]}"; do
+    pkg_installed "$pkg" && mark='+' || mark='-'
+    printf '  [%s] %s\n' "$mark" "$pkg"
+  done
+  [[ $STATE_HEADERS_INSTALLED == true ]] && mark='+' || mark='-'
+  printf '  [%s] %s\n' "$mark" "$STATE_HEADERS_PACKAGE"
+
+  printf '\n'
+  [[ $STATE_MODULE_LOADED == true ]] && mark='+' || mark='-'
+  printf '  [%s] %s module loaded\n' "$mark" "$MODULE"
+  [[ $STATE_LABEL_MATCHES == true ]] && mark='+' || mark='-'
+  printf '  [%s] %s present as "%s"\n' "$mark" "$DEVICE" "$CARD_LABEL"
+  [[ $STATE_PERSISTED == true ]] && mark='+' || mark='-'
+  printf '  [%s] survives a reboot\n' "$mark"
+
+  if ((${#ISSUES[@]} == 0)); then
+    printf '\nReady to capture.\n'
+    return
+  fi
+
+  printf '\n'
+  for issue in "${ISSUES[@]}"; do
+    IFS='|' read -r _ severity message <<<"$issue"
+    printf '  %-8s %s\n' "$severity" "$message"
+  done
+
+  if [[ $(blocked_count) -gt 0 ]]; then
+    printf '\nRun "omavcam setup" to fix this.\n'
+  fi
+}
+
+cmd_doctor() {
+  local as_json=false
+  while (($# > 0)); do
+    case "$1" in
+    --json) as_json=true ;;
+    *) die "unknown option for doctor: $1" ;;
+    esac
+    shift
+  done
+
+  have jq || die "jq is required"
+  inspect
+
+  if [[ $as_json == true ]]; then
+    doctor_json
+  else
+    doctor_human
+  fi
+
+  # Exit status reflects readiness, so callers can branch on it without parsing.
+  [[ $(blocked_count) -eq 0 ]]
+}
+
+# ----------------------------------------------------------------- setup ----
+
+# Omarchy's installer surfaces the pacman run and owns the sudo prompt. Fall
+# back to pacman directly so the script still works outside Omarchy.
+install_packages() {
+  local packages=("$@")
+  ((${#packages[@]} > 0)) || return 0
+
+  printf 'Installing: %s\n' "${packages[*]}"
+  if have omarchy-pkg-add; then
+    omarchy-pkg-add "${packages[@]}"
+  else
+    sudo pacman -S --needed "${packages[@]}"
+  fi
+}
+
+write_conf() {
+  local path="$1" content="$2"
+  if conf_matches "$path" "$content"; then
+    printf 'Already current: %s\n' "$path"
+    return 0
+  fi
+  printf 'Writing %s\n' "$path"
+  printf '%s\n' "$content" | sudo tee "$path" >/dev/null
+}
+
+cmd_setup() {
+  local assume_yes=false
+  while (($# > 0)); do
+    case "$1" in
+    --yes | -y) assume_yes=true ;;
+    *) die "unknown option for setup: $1" ;;
+    esac
+    shift
+  done
+
+  have jq || die "jq is required"
+  inspect
+
+  # Headers first: installing v4l2loopback-dkms without them leaves a package
+  # installed and a module that was never built, which is a confusing state to
+  # land in and a confusing one to explain.
+  local to_install=()
+  [[ $STATE_HEADERS_INSTALLED == false ]] && to_install+=("$STATE_HEADERS_PACKAGE")
+  to_install+=(${MISSING_PACKAGES[@]+"${MISSING_PACKAGES[@]}"})
+
+  if ((${#to_install[@]} > 0)); then
+    if [[ $assume_yes == false ]]; then
+      printf 'omavcam will install: %s\n' "${to_install[*]}"
+      read -r -p 'Continue? [Y/n] ' reply
+      [[ -z $reply || $reply =~ ^[Yy] ]] || die "cancelled"
+    fi
+    install_packages "${to_install[@]}"
+  else
+    printf 'All dependencies present.\n'
+  fi
+
+  write_conf "$MODPROBE_CONF" "$(conf_content_modprobe)"
+  write_conf "$MODULES_LOAD_CONF" "$(conf_content_modules_load)"
+
+  load_module
+
+  printf '\n'
+  ISSUES=()
+  MISSING_PACKAGES=()
+  STATE_PERSISTED=false
+  inspect
+  doctor_human
+  [[ $(blocked_count) -eq 0 ]]
+}
+
+# Applies the freshly written parameters. If the module is already loaded with
+# someone else's parameters, refuse to reload it — another application may be
+# mid-capture on a node we do not own.
+load_module() {
+  if ! module_available; then
+    die "$MODULE is still not available to modprobe — check 'dkms status'"
+  fi
+
+  if ! module_loaded; then
+    printf 'Loading %s\n' "$MODULE"
+    sudo modprobe "$MODULE"
+    return
+  fi
+
+  if [[ -e $DEVICE ]] && [[ "$(device_card_label || true)" == "$CARD_LABEL" ]]; then
+    printf '%s already loaded with omavcam'\''s parameters.\n' "$MODULE"
+    return
+  fi
+
+  printf '%s is already loaded with different parameters.\n' "$MODULE" >&2
+  printf 'Another application may be using it, so omavcam will not reload it.\n' >&2
+  printf 'Reboot to pick up the new configuration, or if nothing is using it:\n' >&2
+  printf '  sudo modprobe -r %s && sudo modprobe %s\n' "$MODULE" "$MODULE" >&2
+  return 1
+}
+
+# ------------------------------------------------------------------ main ----
+
+main() {
+  local command="${1:-help}"
+  shift || true
+
+  case "$command" in
+  doctor) cmd_doctor "$@" ;;
+  setup) cmd_setup "$@" ;;
+  help | --help | -h) usage ;;
+  *)
+    usage >&2
+    die "unknown command: $command"
+    ;;
+  esac
+}
+
+main "$@"

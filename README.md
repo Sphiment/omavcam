@@ -34,8 +34,30 @@ omarchy bar move sphiment.omavcam
 
 You do not have to install these by hand — omavcam detects what is missing and
 offers to install it from the panel, using Omarchy's own package installer.
+`v4l2loopback-dkms` is built by DKMS, so the headers for your running kernel
+(`linux-headers`, or the matching package for `linux-lts`, `linux-zen`, and so
+on) are installed alongside it.
 
 `mpv` and `jq` are also used, and ship with Omarchy.
+
+To do it from a terminal instead:
+
+```bash
+bin/omavcam doctor    # what is missing, and whether it blocks capture
+bin/omavcam setup     # install dependencies and configure the virtual camera
+```
+
+`setup` writes two files, both marked as managed by omavcam:
+
+| File | Contents |
+|---|---|
+| `/etc/modprobe.d/omavcam.conf` | `video_nr=42 card_label="omavcam" exclusive_caps=1 max_openers=10` |
+| `/etc/modules-load.d/omavcam.conf` | `v4l2loopback`, so the node returns after a reboot |
+
+`exclusive_caps=1` means the node only advertises capture capability while
+something is writing to it, so "omavcam" appears in camera pickers exactly when
+you are streaming rather than sitting in every dropdown. Set `OMAVCAM_VIDEO_NR`
+if `/dev/video42` is already taken on your machine.
 
 ## License
 
