@@ -1249,14 +1249,31 @@ restart_capture_with_window() {
   cmd_start ${args[@]+"${args[@]}"}
 }
 
+# Opening the preview always starts it small. A window that reappears at
+# whatever size it was left at weeks ago is a surprise, and "large" or
+# "original" covering the screen on open is a bad one — small is the size that
+# is never in the way, and resizing from there is one keystroke.
+#
+# --keep-size is for reopens that are not the user asking for a preview: a
+# source switch, or the reopen after a setting is applied to a live stream.
+# Resetting those would shrink the window out from under someone who had just
+# sized it.
 preview_start() {
-  local size_name
-  size_name=$(preview_size_name)
+  local keep_size=false
+  [[ ${1:-} == --keep-size ]] && keep_size=true
 
   if preview_running; then
     printf 'Preview is already open.\n'
     return 0
   fi
+
+  ensure_state_dir
+  if [[ $keep_size == false ]]; then
+    printf 'small\n' >"$PREVIEW_SIZE_FILE"
+  fi
+
+  local size_name
+  size_name=$(preview_size_name)
 
   if [[ $PREVIEW_SOURCE == scrcpy ]]; then
     capture_running || die "start a capture before opening the preview"
@@ -1356,9 +1373,10 @@ cmd_preview() {
     ;;
   reopen)
     # Switching source cannot be done in place: the two sources are different
-    # windows owned by different processes.
+    # windows owned by different processes. The size is the user's current
+    # choice, though, so it carries across.
     if preview_running; then preview_stop >/dev/null; fi
-    preview_start
+    preview_start --keep-size
     ;;
   status)
     if preview_running; then
@@ -1540,7 +1558,8 @@ cmd_restart() {
   fi
 
   if [[ $preview_was_open == true ]]; then
-    preview_start >/dev/null 2>&1 || true
+    # Reopening after a setting change, not a fresh open — keep the size.
+    preview_start --keep-size >/dev/null 2>&1 || true
   fi
 
   # Report the capture's fate, not the preview's — a masked failure here told

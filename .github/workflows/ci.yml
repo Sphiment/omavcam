@@ -72,10 +72,13 @@ jobs:
       # loses its glyph removes the widget from the bar with no error anywhere.
       # That shipped once, undetected across two phases, because every check was
       # aimed at the panel rather than the bar.
-      - name: The icon is a non-empty string
+      - name: The icon resolves to a glyph
         run: |
           grep -E 'readonly property string icon:' Panel.qml
-          grep -qE 'readonly property string icon: *"[^"]+"' Panel.qml \
+          # Either a non-empty literal, or a code point built explicitly — the
+          # latter is how anything above the BMP has to be written, since a \u
+          # escape only carries four hex digits.
+          grep -qE 'readonly property string icon: *("[^"]+"|String\.fromCodePoint\(0x[0-9a-fA-F]+\))' Panel.qml \
             || { echo "bar icon is empty — the widget would not render"; exit 1; }
 
   model:
