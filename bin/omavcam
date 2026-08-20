@@ -936,6 +936,40 @@ preview_pid() {
   printf '%s\n' "$pid"
 }
 
+# The compositor knows which process owns the preview window, which is exact
+# and survives a lost pid file — the case that used to strand a borderless
+# window with no way to close it.
+preview_client_pid() {
+  local client
+  client=$(preview_client) || return 1
+  local pid
+  pid=$(jq -r '.pid // empty' <<<"$client")
+  [[ $pid =~ ^[0-9]+$ ]] && ((pid > 0)) || return 1
+  printf '%s\n' "$pid"
+}
+
+# Last resort when there is no compositor to ask: walk /proc ourselves rather
+# than shelling out to `pkill -f`. A pattern broad enough to find the preview is
+# also broad enough to match the shell that is searching for it — pkill will
+# happily kill its own caller, which is how a stop once took the script down
+# with it instead of the window.
+preview_scan_pid() {
+  local dir pid cmdline
+  for dir in /proc/[0-9]*; do
+    pid=${dir#/proc/}
+    ((pid != $$)) || continue
+    [[ -r $dir/cmdline ]] || continue
+    cmdline=$(tr '\0' ' ' <"$dir/cmdline" 2>/dev/null) || continue
+    # Match the launch flag, not the bare title: any shell mentioning the title
+    # (this script included) would otherwise look like the preview.
+    [[ $cmdline == *"--wayland-app-id=$PREVIEW_TITLE"* ]] || continue
+    [[ $cmdline == mpv* || $cmdline == */mpv\ * ]] || continue
+    printf '%s\n' "$pid"
+    return 0
+  done
+  return 1
+}
+
 # True for either source: an mpv we launched, or scrcpy's own window on screen.
 preview_running() {
   preview_pid >/dev/null 2>&1 || preview_client >/dev/null 2>&1
@@ -1107,13 +1141,40 @@ preview_stop() {
     return 0
   fi
 
-  local pid
-  if pid=$(preview_pid); then
+  local pid=""
+  pid=$(preview_pid || preview_client_pid || preview_scan_pid || true)
+
+  if [[ -n $pid ]]; then
     kill "$pid" 2>/dev/null || true
-  else
-    pkill -f "wayland-app-id=$PREVIEW_TITLE" 2>/dev/null || true
+    local waited=0
+    while ((waited < 20)) && kill -0 "$pid" 2>/dev/null; do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
   fi
+
+  # The window is borderless and takes no focus, so a survivor cannot be closed
+  # by hand. Ask the compositor directly before giving up.
+  local client address
+  if client=$(preview_client); then
+    address=$(jq -r '.address // empty' <<<"$client")
+    if [[ -n $address ]]; then
+      hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
+    fi
+    sleep 0.3
+  fi
+
   rm -f "$PREVIEW_PID_FILE"
+
+  # Only claim success once the window is actually gone, so "Preview closed."
+  # can never be printed over a preview that is still on screen.
+  if preview_running; then
+    printf 'Could not close the preview window.\n' >&2
+    return 1
+  fi
   printf 'Preview closed.\n'
 }
 
