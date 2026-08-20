@@ -1131,7 +1131,12 @@ cmd_preview() {
     if preview_running; then preview_stop; else preview_start; fi
     ;;
   status)
-    preview_running && printf 'open\n' || { printf 'closed\n'; return 1; }
+    if preview_running; then
+      printf 'open\n'
+    else
+      printf 'closed\n'
+      return 1
+    fi
     ;;
   resize)
     local preset="${1:-reset}"
