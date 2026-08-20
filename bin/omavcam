@@ -589,23 +589,48 @@ cmd_cameras() {
   serial=$(resolve_serial "$serial")
 
   local raw
-  raw=$(scrcpy -s "$serial" --list-cameras 2>&1 || true)
+  # --list-camera-sizes is a superset of --list-cameras: same header line per
+  # camera, plus the resolutions it accepts. The panel needs those, because
+  # scrcpy rejects any --camera-size the camera does not offer.
+  raw=$(scrcpy -s "$serial" --list-camera-sizes 2>&1 || true)
 
   if [[ $as_json == false ]]; then
     printf '%s\n' "$raw"
     return 0
   fi
 
-  # Lines look like:
-  #     --camera-id=0    (back, 4000x3000, fps=[30, 60])
-  printf '%s\n' "$raw" | sed -n 's/.*--camera-id=\([^ ]*\)[[:space:]]*(\(.*\))[[:space:]]*$/\1\t\2/p' |
-    jq -R -s '
+  # Output is a header line per camera:
+  #     --camera-id=0    (back, 4080x3060, fps={15, 30}, zoom-range=[1, 8])
+  # followed by its sizes, one "- WxH" per line, and then an optional
+  # high-speed section whose sizes only apply with --camera-high-speed and so
+  # must not be offered as ordinary choices.
+  printf '%s\n' "$raw" | awk '
+    function flush() {
+      if (id != "") printf "%s\t%s\t%s\t%s\n", id, facing, desc, sizes
+      id = ""; facing = ""; desc = ""; sizes = ""; highspeed = 0
+    }
+    /--camera-id=/ {
+      flush()
+      line = $0; sub(/.*--camera-id=/, "", line); id = line; sub(/[ \t].*/, "", id)
+      desc = $0; sub(/^[^(]*\(/, "", desc); sub(/\)[ \t]*$/, "", desc)
+      facing = desc; sub(/,.*/, "", facing); gsub(/[ \t]/, "", facing)
+      next
+    }
+    /High speed capture/ { highspeed = 1; next }
+    !highspeed && /^[ \t]*-[ \t]*[0-9]+x[0-9]+[ \t]*$/ {
+      s = $0; gsub(/[ \t]/, "", s); sub(/^-/, "", s)
+      sizes = (sizes == "" ? s : sizes "," s)
+      next
+    }
+    END { flush() }
+  ' | jq -R -s '
       split("\n")
       | map(select(length > 0) | split("\t"))
       | map({
           id: .[0],
-          facing: (.[1] | split(",")[0] | ascii_downcase | gsub("^\\s+|\\s+$"; "")),
-          description: .[1]
+          facing: (.[1] | ascii_downcase),
+          description: .[2],
+          sizes: (if (.[3] // "") == "" then [] else (.[3] | split(",")) end)
         })
     '
 }
