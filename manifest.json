@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "sphiment.omavcam",
+  "name": "omavcam",
+  "version": "0.1.0",
+  "author": "Sphiment",
+  "license": "MIT",
+  "description": "Use an Android phone as a virtual webcam, via scrcpy and v4l2loopback.",
+  "homepage": "https://github.com/Sphiment/omavcam",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "omavcam",
+    "description": "Stream an Android phone's camera or screen into a virtual webcam.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
