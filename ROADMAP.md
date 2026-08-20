@@ -41,7 +41,7 @@ process.
 
 - [x] **0 — Scaffold.** Repo, license, CI, a manifest that validates, and a bar
       widget stub that loads.
-- [ ] **1 — `doctor` + `setup`.** Dependency detection, package install, module
+- [x] **1 — `doctor` + `setup`.** Dependency detection, package install, module
       configuration, and a JSON health report.
 - [ ] **2 — Camera capture over USB.** `devices`, `cameras`, `start`, `stop`,
       `status`. A working webcam, from the terminal.
