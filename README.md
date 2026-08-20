@@ -1,5 +1,7 @@
 # omavcam
 
+<img width="990" height="595" alt="image" src="https://github.com/user-attachments/assets/839df77f-d195-4551-b7e2-ce4f100c3a46" />
+
 Use an Android phone as a virtual webcam on Linux — as a first-class
 [Omarchy](https://omarchy.org) shell plugin.
 
