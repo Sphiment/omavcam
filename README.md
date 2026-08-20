@@ -72,8 +72,28 @@ capture without opening anything. Inside the panel:
 |---|---|
 | `s` | Start or stop the virtual camera |
 | `f` / `b` | Switch to the front or back camera |
+| `p` | Show or hide the preview window |
+| `+` / `-` | Make the preview bigger or smaller |
 | `r` | Re-read the phone, its cameras, and the system state |
 | `esc` | Close |
+
+### The preview window
+
+The preview is an ordinary floating window: pinned above everything, movable
+and resizable like any other, and it takes no focus when it appears. Three size
+presets scale from your monitor's height, so the same preset looks the same on
+a 1080p screen and a 4K one, and the window always keeps the stream's aspect
+ratio.
+
+There are two things it can show:
+
+| Source | Shows | Trade-off |
+|---|---|---|
+| **Virtual cam** (default) | The `/dev/video42` node itself | Exactly the frames the other side receives — same crop, same orientation, same lag. Independent of the capture, so it opens and closes freely. |
+| **scrcpy window** | scrcpy's own window | No second process, and you can tap the phone from your desktop. It is part of the capture, so turning it on or off restarts the stream. |
+
+omavcam applies its Hyprland rules at runtime with `hyprctl`, so installing it
+never writes into your Hyprland config.
 
 Your camera and resolution choices are saved on the widget's entry in
 `~/.config/omarchy/shell.json`, so they survive a restart. Everything the panel

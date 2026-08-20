@@ -25,6 +25,8 @@ Item {
   property var capture: ({})
   property int uptimeSec: 0
   property bool camerasLoaded: false
+  property bool previewOpen: false
+  property string previewSize: "medium"
   property string lastError: ""
   property bool checkedOnce: false
 
@@ -33,7 +35,8 @@ Item {
   property int _desired: -1
   readonly property bool active: _desired === -1 ? streaming : (_desired === 1)
 
-  readonly property bool busy: actionProcess.running || setupWatch.running
+  readonly property bool busy: actionProcess.running || setupWatch.running || previewProcess.running
+  readonly property string previewSource: String(setting("previewSource", "loopback"))
   readonly property var device: Model.selectedDevice(devices, setting("serial", ""))
   readonly property bool hasDevice: !!device
   readonly property var effectiveCamera: Model.effectiveCamera(cameras, setting("facing", "front"), setting("cameraId", ""))
@@ -69,10 +72,16 @@ Item {
 
   // ---- reading state ------------------------------------------------------
 
+  // The CLI takes the preview source from its environment, so anything that
+  // reports or changes preview state has to run under it.
+  function withSource(args) {
+    return ["env", "OMAVCAM_PREVIEW_SOURCE=" + previewSource].concat(args)
+  }
+
   function refresh() {
     if (cli === "") return
     if (!doctorProcess.running) doctorProcess.command = [cli, "doctor", "--json"], doctorProcess.running = true
-    if (!statusProcess.running) statusProcess.command = [cli, "status", "--json"], statusProcess.running = true
+    if (!statusProcess.running) statusProcess.command = withSource([cli, "status", "--json"]), statusProcess.running = true
     if (!devicesProcess.running) devicesProcess.command = [cli, "devices", "--json"], devicesProcess.running = true
   }
 
@@ -119,6 +128,19 @@ Item {
   function toggle() {
     if (active) stop()
     else start()
+  }
+
+  function togglePreview() {
+    if (cli === "" || previewProcess.running) return
+    previewProcess.command = withSource([cli, "preview", previewOpen ? "off" : "on"])
+    previewProcess.running = true
+  }
+
+  function setPreviewSize(size) {
+    if (cli === "" || previewProcess.running) return
+    previewSize = size
+    previewProcess.command = withSource([cli, "preview", "resize", size])
+    previewProcess.running = true
   }
 
   // Package installation needs a terminal: it prompts for sudo and its output
@@ -193,6 +215,10 @@ Item {
       root.streaming = report.streaming === true
       root.capture = report.capture || ({})
       root.uptimeSec = parseInt(report.uptimeSec, 10) || 0
+      if (report.preview) {
+        root.previewOpen = report.preview.open === true
+        if (report.preview.size) root.previewSize = String(report.preview.size)
+      }
       // Observation has caught up with the click, so stop overriding it.
       if (root._desired !== -1 && (root._desired === 1) === root.streaming) root._desired = -1
     }
@@ -223,6 +249,21 @@ Item {
     onExited: function (exitCode) {
       root.cameras = Model.safeParse(camerasOut.text, [])
       root.camerasLoaded = true
+    }
+  }
+
+  Process {
+    id: previewProcess
+    running: false
+    command: []
+    stdout: StdioCollector { id: previewOut; waitForEnd: true }
+    stderr: StdioCollector { id: previewErr; waitForEnd: true }
+    onExited: function (exitCode) {
+      if (exitCode !== 0) {
+        var text = String(previewErr.text || "").trim()
+        if (text !== "") root.lastError = text.split("\n").pop()
+      }
+      root.refresh()
     }
   }
 

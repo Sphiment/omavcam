@@ -47,7 +47,7 @@ process.
       `status`. A working webcam, from the terminal.
 - [x] **3 — Bar widget and panel.** The UI over the CLI: device list, camera
       controls, start/stop, and the missing-dependency install prompt.
-- [ ] **4 — Floating preview.** Movable, pinned preview window, from either the
+- [x] **4 — Floating preview.** Movable, pinned preview window, from either the
       loopback node or scrcpy's own window.
 - [ ] **5 — Screen mirror mode.** Mirror the phone's display into the webcam.
 - [ ] **6 — Wireless transport.** `adb tcpip`, remembered devices, connection

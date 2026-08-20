@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "sphiment.omavcam",
   "name": "omavcam",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "Sphiment",
   "license": "MIT",
   "description": "Use an Android phone as a virtual webcam, via scrcpy and v4l2loopback.",
@@ -26,7 +26,8 @@
       "fps": "",
       "serial": "",
       "refreshIntervalSec": 5,
-      "hideWhenIdle": false
+      "hideWhenIdle": false,
+      "previewSource": "loopback"
     },
     "schema": [
       {
@@ -34,7 +35,11 @@
         "type": "string",
         "label": "Camera",
         "description": "Which camera to use when no explicit camera id is set.",
-        "options": ["front", "back", "external"],
+        "options": [
+          "front",
+          "back",
+          "external"
+        ],
         "defaultValue": "front"
       },
       {
@@ -57,6 +62,17 @@
         "label": "Frame rate",
         "description": "Capture frame rate. Leave empty for the camera's default.",
         "defaultValue": ""
+      },
+      {
+        "key": "previewSource",
+        "type": "string",
+        "label": "Preview shows",
+        "description": "loopback shows the virtual camera itself; scrcpy shows scrcpy's own window, which can also control the phone.",
+        "options": [
+          "loopback",
+          "scrcpy"
+        ],
+        "defaultValue": "loopback"
       },
       {
         "key": "serial",
