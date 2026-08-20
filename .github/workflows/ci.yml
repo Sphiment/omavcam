@@ -46,16 +46,14 @@ jobs:
               || { echo "entry point file not found: '$ep'"; exit 1; }
           done < <(jq -r '.entryPoints[]' manifest.json)
 
-          while IFS=: read -r kind key; do
+          for pair in bar:bar bar-widget:barWidget menu:menu overlay:overlay \
+                      panel:panel service:service; do
+            kind=${pair%%:*}
+            key=${pair##*:}
             jq -e --arg k "$kind" '(.kinds | index($k)) != null' manifest.json > /dev/null || continue
             jq -e --arg k "$key" '.entryPoints | has($k)' manifest.json > /dev/null \
               || { echo "kind '$kind' requires entryPoints.$key"; exit 1; }
-          done <<< "bar:bar
-          bar-widget:barWidget
-          menu:menu
-          overlay:overlay
-          panel:panel
-          service:service"
+          done
 
       # The shell refuses to load a plugin folder containing a symlink, since a
       # symlink could point out of the trusted plugins directory once installed.
