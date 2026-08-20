@@ -45,7 +45,7 @@ process.
       configuration, and a JSON health report.
 - [x] **2 — Camera capture over USB.** `devices`, `cameras`, `start`, `stop`,
       `status`. A working webcam, from the terminal.
-- [ ] **3 — Bar widget and panel.** The UI over the CLI: device list, camera
+- [x] **3 — Bar widget and panel.** The UI over the CLI: device list, camera
       controls, start/stop, and the missing-dependency install prompt.
 - [ ] **4 — Floating preview.** Movable, pinned preview window, from either the
       loopback node or scrcpy's own window.

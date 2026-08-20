@@ -62,6 +62,17 @@ jobs:
           link=$(find . -name .git -prune -o -type l -print -quit)
           [[ -z $link ]] || { echo "symlinks are not allowed: $link"; exit 1; }
 
+  model:
+    name: Model.js helpers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Run helper tests
+        run: deno run --allow-read tests/model_test.js
+
   shellcheck:
     name: Shellcheck
     runs-on: ubuntu-latest

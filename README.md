@@ -63,6 +63,22 @@ if `/dev/video42` is already taken on your machine.
 
 MIT — see [LICENSE](LICENSE).
 
+## Using it
+
+Click the bar icon to open the panel; right-click the icon to start or stop
+capture without opening anything. Inside the panel:
+
+| Key | Does |
+|---|---|
+| `s` | Start or stop the virtual camera |
+| `f` / `b` | Switch to the front or back camera |
+| `r` | Re-read the phone, its cameras, and the system state |
+| `esc` | Close |
+
+Your camera and resolution choices are saved on the widget's entry in
+`~/.config/omarchy/shell.json`, so they survive a restart. Everything the panel
+exposes is also available from `omavcam` on the command line.
+
 ## Development
 
 ```bash
