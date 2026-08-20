@@ -29,7 +29,14 @@ readonly MAX_OPENERS=10
 
 # Capture state lives in the runtime dir so a reboot cannot leave a stale pid
 # behind claiming a capture is running.
-STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omavcam"
+#
+# The fallback is per-user rather than a shared /tmp/omavcam. This script reads
+# pids from here and signals them, so a path any user can create is a way to
+# aim a kill: pre-create the directory, drop in a pid file, and wait. The reads
+# are already guarded — a pid is only signalled after /proc confirms the process
+# is ours — but a predictable shared path should not be the first line of
+# defence, and it is exactly the shape the marketplace security baseline flags.
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp/omavcam-$(id -u)}/omavcam"
 readonly STATE_DIR
 readonly PID_FILE="$STATE_DIR/capture.pid"
 readonly META_FILE="$STATE_DIR/capture.json"
@@ -64,6 +71,8 @@ Usage: omavcam <command> [options]
 Commands:
   doctor [--json]   Report whether the system can run omavcam
   setup [--yes]     Install dependencies and configure the virtual camera
+  uninstall [--yes] Undo setup: remove the module config and unload it
+                    (--packages also removes scrcpy, adb and v4l2loopback)
   devices [--json]  List Android devices adb can see
   cameras [--json]  List the cameras on the phone
   start [options]   Start streaming the phone camera to the virtual camera
@@ -463,8 +472,31 @@ load_module() {
 
 # --------------------------------------------------------------- capture ----
 
+# A symlink redirects every write; a directory owned by someone else means
+# someone else chooses what we read back out. Refuse both rather than carry on
+# into a state store we do not control.
+assert_private_dir() {
+  local path="$1"
+  [[ -L $path ]] && die "state directory is a symlink, refusing to use it: $path"
+  [[ -d $path ]] || die "could not create state directory: $path"
+  [[ -O $path ]] || die "state directory is not owned by you: $path"
+  chmod 700 "$path" 2>/dev/null || true
+}
+
 ensure_state_dir() {
-  mkdir -p "$STATE_DIR"
+  local parent
+  parent=$(dirname "$STATE_DIR")
+
+  # Created a level at a time, not with `mkdir -p -m`: with -p the mode applies
+  # only to the deepest directory, so the parent — the /tmp fallback, the very
+  # path being defended — would be left at whatever the umask allows.
+  if [[ ! -e $parent ]]; then
+    mkdir -m 700 "$parent" 2>/dev/null || true
+    assert_private_dir "$parent"
+  fi
+
+  [[ -d $STATE_DIR ]] || mkdir -m 700 "$STATE_DIR" 2>/dev/null || true
+  assert_private_dir "$STATE_DIR"
 }
 
 # A pid file alone is not proof: pids get recycled, and a crashed scrcpy leaves
@@ -1516,6 +1548,67 @@ cmd_restart() {
   [[ $started == true ]]
 }
 
+# ------------------------------------------------------------- uninstall ----
+
+# setup writes into /etc, so removing the plugin is not enough to undo it.
+# Anything this tool put on the system, this tool takes back off — leaving a
+# module config behind after a user has removed the plugin would be rude, and
+# the marketplace requires removal to be documented.
+cmd_uninstall() {
+  local assume_yes=false keep_packages=true
+  while (($# > 0)); do
+    case "$1" in
+    --yes | -y) assume_yes=true ;;
+    --packages) keep_packages=false ;;
+    *) die "unknown option for uninstall: $1" ;;
+    esac
+    shift
+  done
+
+  printf 'This removes omavcam'"'"'s system configuration:\n'
+  printf '  %s\n' "$MODPROBE_CONF"
+  printf '  %s\n' "$MODULES_LOAD_CONF"
+  printf 'and unloads the %s module if nothing else is using it.\n' "$MODULE"
+  [[ $keep_packages == false ]] && printf 'It also removes: %s\n' "${REQUIRED_PACKAGES[*]}"
+  printf '\n'
+
+  if [[ $assume_yes == false ]]; then
+    read -r -p 'Continue? [y/N] ' reply
+    [[ $reply =~ ^[Yy] ]] || die "cancelled"
+  fi
+
+  capture_running && cmd_stop >/dev/null
+  loopback_preview_stop
+
+  local path
+  for path in "$MODPROBE_CONF" "$MODULES_LOAD_CONF"; do
+    if [[ -e $path ]]; then
+      printf 'Removing %s\n' "$path"
+      sudo rm -f "$path"
+    fi
+  done
+
+  # Only unload what we can see is idle: another application may have opened a
+  # different loopback node on the same module, and taking it out from under
+  # them would break their camera to tidy up ours.
+  if module_loaded; then
+    if sudo modprobe -r "$MODULE" 2>/dev/null; then
+      printf 'Unloaded %s\n' "$MODULE"
+    else
+      printf '%s is still in use; it will be gone after a reboot.\n' "$MODULE" >&2
+    fi
+  fi
+
+  if [[ $keep_packages == false ]]; then
+    printf 'Removing packages: %s\n' "${REQUIRED_PACKAGES[*]}"
+    sudo pacman -Rs --noconfirm "${REQUIRED_PACKAGES[@]}" || true
+  fi
+
+  rm -rf "$STATE_DIR"
+  printf '\nDone. Remove the plugin itself with:\n'
+  printf '  omarchy plugin remove sphiment.omavcam\n'
+}
+
 # ------------------------------------------------------------------ main ----
 
 main() {
@@ -1525,6 +1618,7 @@ main() {
   case "$command" in
   doctor) cmd_doctor "$@" ;;
   setup) cmd_setup "$@" ;;
+  uninstall) cmd_uninstall "$@" ;;
   devices) cmd_devices "$@" ;;
   cameras) cmd_cameras "$@" ;;
   start) cmd_start "$@" ;;
