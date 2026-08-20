@@ -58,8 +58,8 @@ pkg_installed() {
 # v4l2loopback. Arch records the kernel's pkgbase next to its modules, so this
 # resolves correctly on linux, linux-lts, linux-zen, and friends.
 kernel_headers_package() {
-  local pkgbase_file="/usr/lib/modules/$(uname -r)/pkgbase"
-  local pkgbase
+  local pkgbase_file pkgbase
+  pkgbase_file="/usr/lib/modules/$(uname -r)/pkgbase"
   if [[ -r $pkgbase_file ]] && read -r pkgbase <"$pkgbase_file" && [[ -n $pkgbase ]]; then
     printf '%s-headers\n' "$pkgbase"
   else
@@ -80,7 +80,7 @@ module_available() {
 # Module parameters are readable only while the module is loaded. video_nr is an
 # array parameter, so it reads back as a comma-separated list.
 module_param() {
-  local name="$1" path="/sys/module/$MODULE/parameters/$1"
+  local path="/sys/module/$MODULE/parameters/$1"
   [[ -r $path ]] || return 1
   tr -d '\n' <"$path"
 }
@@ -200,7 +200,9 @@ inspect() {
 blocked_count() {
   local issue count=0
   for issue in ${ISSUES[@]+"${ISSUES[@]}"}; do
-    [[ ${issue#*|} == blocked\|* ]] && ((count++)) || true
+    if [[ ${issue#*|} == blocked\|* ]]; then
+      count=$((count + 1))
+    fi
   done
   printf '%s\n' "$count"
 }
@@ -281,7 +283,7 @@ doctor_human() {
   done
 
   if [[ $(blocked_count) -gt 0 ]]; then
-    printf '\nRun `omavcam setup` to fix this.\n'
+    printf '\nRun "omavcam setup" to fix this.\n'
   fi
 }
 
