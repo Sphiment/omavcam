@@ -66,7 +66,7 @@ Panel {
     service.applyLive(change)
   }
 
-  readonly property var previewSizes: ["small", "medium", "large"]
+  readonly property var previewSizes: ["small", "medium", "large", "original"]
 
   function nextPreviewSize(step) {
     var index = previewSizes.indexOf(service.previewSize)
@@ -412,7 +412,8 @@ Panel {
             options: [
               {value: "small", label: "Small"},
               {value: "medium", label: "Medium"},
-              {value: "large", label: "Large"}
+              {value: "large", label: "Large"},
+              {value: "original", label: "Original"}
             ]
             value: service.previewSize
             foreground: root.foreground
@@ -439,9 +440,13 @@ Panel {
 
           Text {
             width: parent.width
-            text: service.previewSource === "loopback"
-                  ? "Shows the virtual camera itself — exactly what the other side sees."
-                  : "Shows scrcpy's window, which can also control the phone. Switching it restarts the stream."
+            text: {
+              if (service.previewSize === "original")
+                return "Original is the stream's real pixel size, so it can be larger than the screen. Drag it from its top-left corner."
+              return service.previewSource === "loopback"
+                     ? "Shows the virtual camera itself — exactly what the other side sees."
+                     : "Shows scrcpy's window, which can also control the phone. Switching it restarts the stream."
+            }
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

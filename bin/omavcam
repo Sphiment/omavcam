@@ -76,7 +76,10 @@ Start options:
       --v4l2-buffer <ms>  Buffering, to smooth a stuttering stream
 
 Preview presets:
-  small, medium, large, smaller, larger, reset
+  small, medium, large, original, smaller, larger, reset
+
+  original is the stream's real pixel size, uncompressed — on a phone that
+  out-resolves the monitor the window is larger than the screen by design.
 
 Environment:
   OMAVCAM_VIDEO_NR        Which /dev/videoN to claim (default: 42)
@@ -879,7 +882,7 @@ preview_size_name() {
   local size=medium
   [[ -r $PREVIEW_SIZE_FILE ]] && read -r size <"$PREVIEW_SIZE_FILE" 2>/dev/null
   case "$size" in
-  small | medium | large) printf '%s\n' "$size" ;;
+  small | medium | large | original) printf '%s\n' "$size" ;;
   *) printf 'medium\n' ;;
   esac
 }
@@ -906,8 +909,11 @@ hypr_dispatch() {
 apply_preview_rules() {
   command -v hyprctl >/dev/null 2>&1 || return 0
 
+  # Every preset needs its own rule: the app id carries the preset name and is
+  # fixed when mpv launches, so a preset with no matching rule gets no rule at
+  # all and the preview is tiled into the layout instead of floating.
   local size
-  for size in small medium large; do
+  for size in small medium large original; do
     hypr_rule \
       "o.window(\"^($(preview_app_id "$size"))\$\", { float = true, pin = true, no_initial_focus = true, no_dim = true, border_size = 0, opacity = \"1 1\", tag = \"-default-opacity\" })" \
       windowrule "float, class:^($(preview_app_id "$size"))\$"
@@ -1004,20 +1010,23 @@ loopback_preview_stop() {
   rm -f "$PREVIEW_PID_FILE"
 }
 
-# The stream's own aspect ratio, so the preview is never letterboxed or
-# stretched. Falls back to 16:9 when the node cannot be read.
-preview_aspect() {
+# The stream's real pixel dimensions, or failure if the node cannot be read.
+preview_native_size() {
   local width height
   read -r width height < <(
     v4l2-ctl --device "$DEVICE" --get-fmt-video 2>/dev/null |
       sed -n 's/^[[:space:]]*Width\/Height[[:space:]]*:[[:space:]]*\([0-9]*\)\/\([0-9]*\).*/\1 \2/p' |
       head -1
   )
-  if [[ ${width:-0} =~ ^[0-9]+$ ]] && [[ ${height:-0} =~ ^[0-9]+$ ]] && ((width > 0 && height > 0)); then
-    printf '%s %s\n' "$width" "$height"
-  else
-    printf '16 9\n'
-  fi
+  [[ ${width:-0} =~ ^[0-9]+$ ]] && [[ ${height:-0} =~ ^[0-9]+$ ]] || return 1
+  ((width > 0 && height > 0)) || return 1
+  printf '%s %s\n' "$width" "$height"
+}
+
+# The stream's own aspect ratio, so the preview is never letterboxed or
+# stretched. Falls back to 16:9 when the node cannot be read.
+preview_aspect() {
+  preview_native_size || printf '16 9\n'
 }
 
 # Presets scale from monitor height, so the preview occupies the same share of
@@ -1049,26 +1058,38 @@ preview_place() {
       | @tsv' <<<"$monitor"
   )
 
-  local fraction
-  case "$size_name" in
-  small) fraction=18 ;;
-  large) fraction=34 ;;
-  *) fraction=25 ;;
-  esac
+  local width height
+  local native_w native_h
 
-  local aw ah
-  read -r aw ah < <(preview_aspect)
+  if [[ $size_name == original ]] && read -r native_w native_h < <(preview_native_size); then
+    # Deliberately unclamped: "original" means the stream's real pixels, one for
+    # one, even when the phone out-resolves the monitor — a 4080x3060 camera on
+    # a 2048x1152 desktop is supposed to overflow. The placement below pins it
+    # to the top-left corner so it can be dragged from there.
+    width=$native_w
+    height=$native_h
+  else
+    local fraction
+    case "$size_name" in
+    small) fraction=18 ;;
+    large | original) fraction=34 ;;
+    *) fraction=25 ;;
+    esac
 
-  local height width
-  height=$((mh * fraction / 100))
-  width=$((height * aw / ah))
+    local aw ah
+    read -r aw ah < <(preview_aspect)
 
-  # A wide stream on a short screen can overflow; clamp to the space the
-  # margins leave rather than letting the preview run off the monitor.
-  local max_width=$((mw - 2 * PREVIEW_MARGIN))
-  if ((max_width > 0 && width > max_width)); then
-    width=$max_width
-    height=$((width * ah / aw))
+    height=$((mh * fraction / 100))
+    width=$((height * aw / ah))
+
+    # A wide stream on a short screen can overflow; clamp to the space the
+    # margins leave rather than letting the preview run off the monitor. Only
+    # the proportional presets are clamped — original is meant to overflow.
+    local max_width=$((mw - 2 * PREVIEW_MARGIN))
+    if ((max_width > 0 && width > max_width)); then
+      width=$max_width
+      height=$((width * ah / aw))
+    fi
   fi
 
   local x y
@@ -1239,23 +1260,25 @@ cmd_preview() {
     local current
     current=$(preview_size_name)
     case "$preset" in
-    small | medium | large) ;;
+    small | medium | large | original) ;;
     reset) preset=medium ;;
     larger)
       case "$current" in
       small) preset=medium ;;
       medium) preset=large ;;
-      *) preset=large ;;
+      large) preset=original ;;
+      *) preset=original ;;
       esac
       ;;
     smaller)
       case "$current" in
+      original) preset=large ;;
       large) preset=medium ;;
       medium) preset=small ;;
       *) preset=small ;;
       esac
       ;;
-    *) die "preview resize takes small, medium, large, smaller, larger, or reset" ;;
+    *) die "preview resize takes small, medium, large, original, smaller, larger, or reset" ;;
     esac
     printf '%s\n' "$preset" >"$PREVIEW_SIZE_FILE"
     # mpv's app id is fixed at launch and carries the preset name, so a resize

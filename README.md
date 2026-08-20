@@ -73,7 +73,7 @@ capture without opening anything. Inside the panel:
 | `s` | Start or stop the virtual camera |
 | `f` / `b` | Switch to the front or back camera |
 | `p` | Show or hide the preview window |
-| `+` / `-` | Make the preview bigger or smaller |
+| `+` / `-` | Step the preview through small, medium, large, original |
 | `r` | Re-read the phone, its cameras, and the system state |
 | `esc` | Close |
 
@@ -84,6 +84,12 @@ and resizable like any other, and it takes no focus when it appears. Three size
 presets scale from your monitor's height, so the same preset looks the same on
 a 1080p screen and a 4K one, and the window always keeps the stream's aspect
 ratio.
+
+Sizes are `small`, `medium`, `large`, and `original`. The first three scale from
+your monitor's height. **`original` is the stream's real pixel size, and is not
+scaled down** — a phone that out-resolves your monitor gives a window larger
+than the screen, on purpose. It is placed at the top-left corner so you can drag
+it from there.
 
 There are two things it can show:
 
