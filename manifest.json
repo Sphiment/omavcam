@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "sphiment.omavcam",
   "name": "omavcam",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "author": "Sphiment",
   "license": "MIT",
   "description": "Use an Android phone as a virtual webcam, via scrcpy and v4l2loopback.",
@@ -18,6 +18,68 @@
     "description": "Stream an Android phone's camera or screen into a virtual webcam.",
     "category": "Media",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "defaults": {
+      "facing": "front",
+      "cameraId": "",
+      "size": "",
+      "fps": "",
+      "serial": "",
+      "refreshIntervalSec": 5,
+      "hideWhenIdle": false
+    },
+    "schema": [
+      {
+        "key": "facing",
+        "type": "string",
+        "label": "Camera",
+        "description": "Which camera to use when no explicit camera id is set.",
+        "options": ["front", "back", "external"],
+        "defaultValue": "front"
+      },
+      {
+        "key": "cameraId",
+        "type": "string",
+        "label": "Camera id",
+        "description": "Explicit camera id. Overrides the camera setting when set.",
+        "defaultValue": ""
+      },
+      {
+        "key": "size",
+        "type": "string",
+        "label": "Resolution",
+        "description": "Must be a resolution the camera offers; leave empty for its default.",
+        "defaultValue": ""
+      },
+      {
+        "key": "fps",
+        "type": "string",
+        "label": "Frame rate",
+        "description": "Capture frame rate. Leave empty for the camera's default.",
+        "defaultValue": ""
+      },
+      {
+        "key": "serial",
+        "type": "string",
+        "label": "Phone serial",
+        "description": "Which phone to use when more than one is connected.",
+        "defaultValue": ""
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 2,
+        "max": 120,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "hideWhenIdle",
+        "type": "boolean",
+        "label": "Hide when no phone is connected",
+        "defaultValue": false
+      }
+    ]
   }
 }
