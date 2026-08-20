@@ -95,6 +95,16 @@ There are two things it can show:
 omavcam applies its Hyprland rules at runtime with `hyprctl`, so installing it
 never writes into your Hyprland config.
 
+Changes apply to a running stream. scrcpy fixes the camera, resolution and
+frame rate when it launches, so none of them can be altered on a live stream —
+omavcam re-establishes the capture with the new setting instead of making you
+stop and start by hand. Expect a couple of seconds during which the virtual
+camera goes away and comes back; a meeting app will usually pick it straight
+back up, but it is a visible blip, not a seamless switch.
+
+Resolutions belong to a camera, not to the phone, so switching cameras drops a
+resolution the new one does not offer and falls back to its default.
+
 Your camera and resolution choices are saved on the widget's entry in
 `~/.config/omarchy/shell.json`, so they survive a restart. Everything the panel
 exposes is also available from `omavcam` on the command line.
