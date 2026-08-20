@@ -43,7 +43,7 @@ process.
       widget stub that loads.
 - [x] **1 — `doctor` + `setup`.** Dependency detection, package install, module
       configuration, and a JSON health report.
-- [ ] **2 — Camera capture over USB.** `devices`, `cameras`, `start`, `stop`,
+- [x] **2 — Camera capture over USB.** `devices`, `cameras`, `start`, `stop`,
       `status`. A working webcam, from the terminal.
 - [ ] **3 — Bar widget and panel.** The UI over the CLI: device list, camera
       controls, start/stop, and the missing-dependency install prompt.

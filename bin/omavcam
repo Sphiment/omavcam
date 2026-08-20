@@ -53,7 +53,8 @@ Start options:
   -s, --serial <serial>   Which phone to use, when more than one is attached
       --facing <f>        front, back, or external (default: front)
       --camera-id <id>    Explicit camera id; overrides --facing
-      --size <WxH>        Capture resolution, e.g. 1920x1080
+      --size <WxH>        Capture resolution; must be one the camera offers,
+                          as listed by "omavcam cameras"
       --fps <n>           Capture frame rate
       --v4l2-buffer <ms>  Buffering, to smooth a stuttering stream
 
@@ -557,7 +558,15 @@ resolve_serial() {
 # rather than assuming. Keeps a new scrcpy from breaking capture over a flag
 # that was renamed.
 scrcpy_supports() {
-  scrcpy --help 2>&1 | grep -q -- "$1"
+  local help
+  # Captured, not piped. `scrcpy --help | grep -q` closes the pipe the moment
+  # grep matches, scrcpy dies of SIGPIPE, and pipefail reports that as failure —
+  # so every flag appearing early in the help text was silently judged
+  # unsupported.
+  help=$(scrcpy --help 2>&1 || true)
+  # Anchored to the start of the option, so --no-window is not satisfied by
+  # --no-window-aspect-ratio-lock.
+  grep -qE "^[[:space:]]*$1([=,[:space:]]|\$)" <<<"$help"
 }
 
 cmd_cameras() {
