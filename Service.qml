@@ -29,6 +29,9 @@ Item {
   // True while a setting change is being applied to a live stream.
   property bool reapplying: false
   property string previewSize: "medium"
+  // What "original" would produce on the monitor the preview would land on.
+  // null until a stream exists to measure.
+  property var previewOriginal: null
   property string lastError: ""
   property bool checkedOnce: false
 
@@ -269,6 +272,7 @@ Item {
       if (report.preview) {
         root.previewOpen = report.preview.open === true
         if (report.preview.size) root.previewSize = String(report.preview.size)
+        root.previewOriginal = report.preview.original || null
       }
       // Observation has caught up with the click, so stop overriding it.
       if (root._desired !== -1 && (root._desired === 1) === root.streaming) root._desired = -1

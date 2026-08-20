@@ -49,6 +49,14 @@ readonly PREVIEW_MARGIN=40
 PREVIEW_SOURCE="${OMAVCAM_PREVIEW_SOURCE:-loopback}"
 readonly PREVIEW_SOURCE
 
+# Reads a flag's value, allowing it to be empty but not missing.
+option_value() {
+  local name="$1"
+  shift
+  (($# >= 2)) || die "--$name needs a value"
+  printf '%s' "$2"
+}
+
 usage() {
   cat <<'USAGE'
 Usage: omavcam <command> [options]
@@ -666,12 +674,14 @@ cmd_start() {
   while (($# > 0)); do
     case "$1" in
     --window) show_window=true ;;
-    -s | --serial) serial="${2:?--serial needs a value}" && shift ;;
-    --facing) facing="${2:?--facing needs a value}" && shift ;;
-    --camera-id) camera_id="${2:?--camera-id needs a value}" && shift ;;
-    --size) size="${2:?--size needs a value}" && shift ;;
-    --fps) fps="${2:?--fps needs a value}" && shift ;;
-    --v4l2-buffer) v4l2_buffer="${2:?--v4l2-buffer needs a value}" && shift ;;
+    # Empty is accepted and means "unset", matching restart. Rejecting it here
+    # made start refuse arguments restart was happy to take.
+    -s | --serial) serial=$(option_value serial "$@") && shift ;;
+    --facing) facing=$(option_value facing "$@") && shift ;;
+    --camera-id) camera_id=$(option_value camera-id "$@") && shift ;;
+    --size) size=$(option_value size "$@") && shift ;;
+    --fps) fps=$(option_value fps "$@") && shift ;;
+    --v4l2-buffer) v4l2_buffer=$(option_value v4l2-buffer "$@") && shift ;;
     *) die "unknown option for start: $1" ;;
     esac
     shift
@@ -818,6 +828,30 @@ cmd_stop() {
 
 # ---------------------------------------------------------------- status ----
 
+# What "original" would produce here, so the panel can warn before applying it
+# rather than after the window is already off the screen. Null when there is no
+# stream to measure.
+preview_original_json() {
+  local nw nh mw mh
+  if ! read -r nw nh < <(preview_native_size); then
+    printf 'null\n'
+    return 0
+  fi
+  if ! read -r mw mh < <(preview_target_monitor); then
+    mw=0
+    mh=0
+  fi
+
+  local fits=false
+  if ((mw > 0 && mh > 0 && nw <= mw && nh <= mh)); then
+    fits=true
+  fi
+
+  jq -n --argjson nw "$nw" --argjson nh "$nh" \
+    --argjson mw "$mw" --argjson mh "$mh" --argjson fits "$fits" \
+    '{width: $nw, height: $nh, screenWidth: $mw, screenHeight: $mh, fitsScreen: $fits}'
+}
+
 cmd_status() {
   local as_json=false
   while (($# > 0)); do
@@ -853,8 +887,10 @@ cmd_status() {
       --argjson previewOpen "$preview_open" \
       --arg previewSize "$(preview_size_name)" \
       --arg previewSource "$PREVIEW_SOURCE" \
+      --argjson original "$(preview_original_json)" \
       '{running: $running, streaming: $streaming, pid: $pid, capture: $meta,
-        preview: {open: $previewOpen, size: $previewSize, source: $previewSource}}
+        preview: {open: $previewOpen, size: $previewSize, source: $previewSource,
+                  original: $original}}
        | .uptimeSec = (if $meta.startedAt then (now | floor) - $meta.startedAt else null end)'
     return 0
   fi
@@ -1027,6 +1063,51 @@ preview_native_size() {
 # stretched. Falls back to 16:9 when the node cannot be read.
 preview_aspect() {
   preview_native_size || printf '16 9\n'
+}
+
+# Logical size of the monitor the preview would land on: the one it already
+# occupies, or the focused one when it is closed. Logical rather than physical,
+# because window geometry is in logical units — on a scaled display the two
+# differ, and comparing a stream's pixels against physical ones would call a
+# window "fitting" while it runs off the screen.
+preview_target_monitor() {
+  command -v hyprctl >/dev/null 2>&1 || return 1
+
+  local monitors monitor client monitor_id=""
+  monitors=$(hyprctl monitors -j 2>/dev/null) || return 1
+
+  if client=$(preview_client); then
+    monitor_id=$(jq -r '.monitor // empty' <<<"$client")
+  fi
+
+  if [[ -n $monitor_id ]]; then
+    monitor=$(jq -cer --argjson id "$monitor_id" 'first(.[] | select(.id == $id)) // empty' <<<"$monitors" 2>/dev/null) || return 1
+  else
+    monitor=$(jq -cer 'first(.[] | select(.focused == true)) // .[0] // empty' <<<"$monitors" 2>/dev/null) || return 1
+  fi
+
+  jq -r '
+    . as $m
+    | (($m.transform // 0) % 2 == 1) as $rotated
+    | [ (((if $rotated then .height else .width end) / .scale) | floor),
+        (((if $rotated then .width else .height end) / .scale) | floor) ]
+    | @tsv' <<<"$monitor"
+}
+
+# Whether the stream at its real size would fit on that monitor. This is the
+# dynamic answer to "is original going to be huge here": a fixed threshold would
+# be wrong on any display that is not the one it was picked for, and wrong again
+# as soon as the window moves to a second monitor.
+#
+# 0 fits, 1 does not, 2 unknown. Unknown is kept distinct from "does not fit" on
+# purpose: not being able to measure is not evidence of a problem, and warning
+# on it would mean warning with question marks where the numbers should be.
+preview_original_fits() {
+  local nw nh mw mh
+  read -r nw nh < <(preview_native_size) || return 2
+  read -r mw mh < <(preview_target_monitor) || return 2
+  ((nw <= mw && nh <= mh)) || return 1
+  return 0
 }
 
 # Presets scale from monitor height, so the preview occupies the same share of
@@ -1280,6 +1361,20 @@ cmd_preview() {
       ;;
     *) die "preview resize takes small, medium, large, original, smaller, larger, or reset" ;;
     esac
+    if [[ $preset == original ]]; then
+      local fits=0
+      preview_original_fits || fits=$?
+      # Only when it is known not to fit — never on the unknown case, which
+      # would print a warning full of question marks.
+      if ((fits == 1)); then
+        local nw nh mw mh
+        read -r nw nh < <(preview_native_size)
+        read -r mw mh < <(preview_target_monitor)
+        printf 'Original is %sx%s, larger than this screen (%sx%s) — the window will extend past the edges.\n' \
+          "$nw" "$nh" "$mw" "$mh" >&2
+      fi
+    fi
+
     printf '%s\n' "$preset" >"$PREVIEW_SIZE_FILE"
     # mpv's app id is fixed at launch and carries the preset name, so a resize
     # only needs to move the existing window, not relaunch it.

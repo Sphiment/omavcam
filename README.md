@@ -91,6 +91,17 @@ scaled down** — a phone that out-resolves your monitor gives a window larger
 than the screen, on purpose. It is placed at the top-left corner so you can drag
 it from there.
 
+Because that is easy to ask for by accident, choosing `original` asks first when
+the stream really is bigger than the screen it would open on:
+
+> The preview would be 3264×2448, larger than this screen (2048×1152). It will
+> extend past the edges — drag it by its top-left corner.
+
+The check is made against the monitor the preview would land on, not a fixed
+threshold, so it is right on a laptop panel and on a 4K display, and it changes
+when you move the window to another monitor. A stream that fits is applied
+without asking.
+
 There are two things it can show:
 
 | Source | Shows | Trade-off |
