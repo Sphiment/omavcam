@@ -24,6 +24,27 @@ Then place it on the bar:
 omarchy bar move sphiment.omavcam
 ```
 
+## Removing it
+
+```bash
+omavcam uninstall                          # undo the system configuration
+omarchy plugin remove sphiment.omavcam     # remove the plugin
+```
+
+`uninstall` deletes the two files `setup` wrote, unloads the `v4l2loopback`
+module if nothing else is using it, stops any capture, and clears omavcam's
+runtime state. It asks first, and leaves the packages alone unless you pass
+`--packages`.
+
+Removing the plugin without running `uninstall` leaves the module config behind;
+it is harmless, but it is yours to delete:
+
+```bash
+sudo rm -f /etc/modprobe.d/omavcam.conf /etc/modules-load.d/omavcam.conf
+```
+
+omavcam never writes to your Hyprland config, so there is nothing to undo there.
+
 ## Requirements
 
 | Package | Why |
@@ -39,6 +60,11 @@ offers to install it from the panel, using Omarchy's own package installer.
 on) are installed alongside it.
 
 `mpv` and `jq` are also used, and ship with Omarchy.
+
+All of these are ordinary Arch packages installed from the official
+repositories, and each carries its own license: scrcpy and `android-tools` are
+Apache-2.0, `v4l2loopback-dkms` is GPL-2.0-or-later, `mpv` is GPL-2.0-or-later,
+and `jq` is MIT. omavcam bundles none of them — it calls them.
 
 To do it from a terminal instead:
 
