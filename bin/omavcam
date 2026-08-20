@@ -1151,7 +1151,9 @@ preview_stop() {
       sleep 0.1
       waited=$((waited + 1))
     done
-    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
   fi
 
   # The window is borderless and takes no focus, so a survivor cannot be closed
@@ -1159,7 +1161,9 @@ preview_stop() {
   local client address
   if client=$(preview_client); then
     address=$(jq -r '.address // empty' <<<"$client")
-    [[ -n $address ]] && hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
+    if [[ -n $address ]]; then
+      hyprctl dispatch closewindow "address:$address" >/dev/null 2>&1 || true
+    fi
     sleep 0.3
   fi
 
