@@ -175,7 +175,11 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(360))
+    // 380 is the shared width for bar popups — audio, bluetooth, network,
+    // monitor, power, tailscale and agents all use it. This panel was 20 units
+    // narrower for no reason, which is visible the moment it opens next to one
+    // of them.
+    contentWidth: panel.fittedContentWidth(Style.space(380))
     contentHeight: panel.fittedContentHeight(column.implicitHeight)
 
     PanelKeyCatcher {
