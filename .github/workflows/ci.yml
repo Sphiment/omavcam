@@ -62,6 +62,22 @@ jobs:
           link=$(find . -name .git -prune -o -type l -print -quit)
           [[ -z $link ]] || { echo "symlinks are not allowed: $link"; exit 1; }
 
+  glyphs:
+    name: Bar icon glyph
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # BarIconButton hides a button whose text is empty, so an icon string that
+      # loses its glyph removes the widget from the bar with no error anywhere.
+      # That shipped once, undetected across two phases, because every check was
+      # aimed at the panel rather than the bar.
+      - name: The icon is a non-empty string
+        run: |
+          grep -E 'readonly property string icon:' Panel.qml
+          grep -qE 'readonly property string icon: *"[^"]+"' Panel.qml \
+            || { echo "bar icon is empty — the widget would not render"; exit 1; }
+
   model:
     name: Model.js helpers
     runs-on: ubuntu-latest

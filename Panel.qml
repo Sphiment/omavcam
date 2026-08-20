@@ -23,9 +23,15 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  // Same video-camera glyph Omarchy uses for screen recording, so it is known
-  // to render in the bar font. State is carried by color, not by glyph.
-  readonly property string icon: ""
+  // The video-camera glyph Omarchy itself uses for screen recording, so it is
+  // known to render in the bar font. State is carried by color, not by glyph.
+  //
+  // Written as an escape on purpose: as a literal character it is invisible in
+  // a diff and survives nothing — an editor, a rewrite, or a stray encoding
+  // step can drop it, leaving an empty string. BarIconButton hides a button
+  // with no text, so losing it removes the widget from the bar silently, with
+  // no error anywhere.
+  readonly property string icon: "\uf03d"
 
   readonly property color barIconColor: {
     if (service.active) return barForeground
