@@ -48,6 +48,14 @@ Panel {
     service.refreshCameras()
   }
 
+  readonly property var previewSizes: ["small", "medium", "large"]
+
+  function nextPreviewSize(step) {
+    var index = previewSizes.indexOf(service.previewSize)
+    if (index === -1) index = 1
+    return previewSizes[Math.max(0, Math.min(previewSizes.length - 1, index + step))]
+  }
+
   function persist(key, value) {
     if (!bar || !bar.shell || typeof bar.shell.updateEntryInline !== "function") return
     var entry = {id: root.moduleName}
@@ -87,6 +95,7 @@ Panel {
     function start(): void { service.start() }
     function stop(): void { service.stop() }
     function toggleCapture(): void { service.toggle() }
+    function togglePreview(): void { service.togglePreview() }
   }
 
   BarIconButton {
@@ -122,6 +131,9 @@ Panel {
         else if (key === "r") { service.refresh(); service.refreshCameras() }
         else if (key === "f") root.chooseFacing("front")
         else if (key === "b") root.chooseFacing("back")
+        else if (key === "p") service.togglePreview()
+        else if (key === "+" || key === "=") service.setPreviewSize(nextPreviewSize(1))
+        else if (key === "-" || key === "_") service.setPreviewSize(nextPreviewSize(-1))
       }
 
       Column {
@@ -330,6 +342,82 @@ Panel {
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
+          }
+        }
+
+        // ---------- Preview ----------
+        Column {
+          width: parent.width
+          spacing: Style.space(8)
+          visible: !service.needsInstall && service.streaming
+
+          PanelSeparator { width: parent.width }
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(previewHeader.implicitHeight, previewSwitch.implicitHeight)
+
+            PanelSectionHeader {
+              id: previewHeader
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "PREVIEW"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            ToggleSwitch {
+              id: previewSwitch
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              checked: service.previewOpen
+              busy: service.busy
+              foreground: root.foreground
+              onToggled: service.togglePreview()
+
+              PanelToolTip {
+                visible: previewSwitch.containsMouse
+                text: service.previewOpen ? "Close the preview window" : "Show what the other side sees"
+                fontFamily: root.fontFamily
+              }
+            }
+          }
+
+          ButtonGroup {
+            width: parent.width
+            visible: service.previewOpen
+            options: [
+              {value: "small", label: "Small"},
+              {value: "medium", label: "Medium"},
+              {value: "large", label: "Large"}
+            ]
+            value: service.previewSize
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onChanged: function (value) { service.setPreviewSize(value) }
+          }
+
+          ButtonGroup {
+            width: parent.width
+            options: [
+              {value: "loopback", label: "Virtual cam"},
+              {value: "scrcpy", label: "scrcpy window"}
+            ]
+            value: service.previewSource
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onChanged: function (value) { root.persist("previewSource", value) }
+          }
+
+          Text {
+            width: parent.width
+            text: service.previewSource === "loopback"
+                  ? "Shows the virtual camera itself — exactly what the other side sees."
+                  : "Shows scrcpy's window, which can also control the phone. Switching it restarts the stream."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
         }
 
