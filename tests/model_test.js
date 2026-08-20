@@ -7,7 +7,7 @@ const M = {};
 new Function("exports", src + `
 Object.assign(exports, {deviceLabel, deviceStateText, selectedDevice, effectiveCamera,
   sizeOptions, shortlistSizes, formatUptime, blockingIssue, missingPackagesText, safeParse,
-  camerasForFacing, firstReadyDevice, facingLabel});`)(M);
+  camerasForFacing, firstReadyDevice, facingLabel, sizeSupported});`)(M);
 
 const cams = [
   {id: "0", facing: "back",  sizes: ["4080x3060","1920x1080","1280x720","640x480"]},
@@ -55,6 +55,10 @@ check("safeParse survives empty",      M.safeParse("", []), []);
 check("safeParse reads json",          M.safeParse('{"a":1}', {}).a, 1);
 check("camerasForFacing finds both",   M.camerasForFacing(cams, "front").length, 2);
 check("facingLabel capitalises",       M.facingLabel("back"), "Back");
+check("size kept when camera has it",  M.sizeSupported(cams, "front", "", "1920x1080"), true);
+check("size dropped across cameras",   M.sizeSupported(cams, "front", "", "4080x3060"), false);
+check("empty size always allowed",     M.sizeSupported(cams, "front", "", ""), true);
+check("size checked against id too",   M.sizeSupported(cams, "front", "0", "4080x3060"), true);
 
 console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILED`);
 if (fails) Deno.exit(1);

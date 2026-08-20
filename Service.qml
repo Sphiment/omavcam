@@ -26,6 +26,8 @@ Item {
   property int uptimeSec: 0
   property bool camerasLoaded: false
   property bool previewOpen: false
+  // True while a setting change is being applied to a live stream.
+  property bool reapplying: false
   property string previewSize: "medium"
   property string lastError: ""
   property bool checkedOnce: false
@@ -61,6 +63,7 @@ Item {
     if (!checkedOnce) return "Checking…"
     if (needsInstall) return "Dependencies missing"
     if (blockingIssue && !streaming) return "Not ready"
+    if (reapplying) return "Applying…"
     if (streaming) {
       var label = Model.formatUptime(uptimeSec)
       return label === "" ? "Streaming" : "Streaming · " + label
@@ -74,8 +77,52 @@ Item {
 
   // The CLI takes the preview source from its environment, so anything that
   // reports or changes preview state has to run under it.
-  function withSource(args) {
-    return ["env", "OMAVCAM_PREVIEW_SOURCE=" + previewSource].concat(args)
+  function withSource(args, source) {
+    return ["env", "OMAVCAM_PREVIEW_SOURCE=" + (source || previewSource)].concat(args)
+  }
+
+  // scrcpy fixes the camera, resolution and frame rate at launch, so a setting
+  // cannot be changed on a live stream — it can only be re-established on a new
+  // one. restart carries the settings across, and omavcam does it for the user
+  // rather than making them stop and start by hand.
+  //
+  // Every managed value is sent explicitly, including empty ones, because empty
+  // is a real choice ("camera default") and must be distinguishable from
+  // "unspecified", which restart takes to mean "leave alone".
+  function restartArgs(overrides) {
+    var o = overrides || {}
+    function pick(key, fallback) {
+      return o[key] !== undefined ? String(o[key]) : String(setting(key, fallback))
+    }
+
+    var args = []
+    if (device) args.push("-s", String(device.serial))
+
+    var cameraId = pick("cameraId", "")
+    if (cameraId !== "") args.push("--camera-id", cameraId)
+    else args.push("--facing", pick("facing", "front"))
+
+    args.push("--size", pick("size", ""))
+    args.push("--fps", pick("fps", ""))
+    return args
+  }
+
+  // Applies a setting to a running capture. Does nothing when idle — the new
+  // value is already persisted and will be used by the next start.
+  function applyLive(overrides) {
+    if (cli === "" || actionProcess.running) return
+    if (!running && !streaming) return
+    reapplying = true
+    _desired = 1
+    lastError = ""
+    actionProcess.command = withSource([cli, "restart"].concat(restartArgs(overrides)))
+    actionProcess.running = true
+  }
+
+  function reopenPreview(source) {
+    if (cli === "" || previewProcess.running || !previewOpen) return
+    previewProcess.command = withSource([cli, "preview", "reopen"], source)
+    previewProcess.running = true
   }
 
   function refresh() {
@@ -90,6 +137,10 @@ Item {
   // every poll.
   function refreshCameras() {
     if (cli === "" || !hasDevice || camerasProcess.running) return
+    // Listing cameras opens the camera on the phone. Doing that while a capture
+    // is being started or restarted makes the two contend for the same device,
+    // and the capture is the one that matters.
+    if (actionProcess.running) return
     camerasProcess.command = [cli, "cameras", "--json", "-s", String(device.serial)]
     camerasProcess.running = true
   }
@@ -274,6 +325,7 @@ Item {
     stdout: StdioCollector { id: actionOut; waitForEnd: true }
     stderr: StdioCollector { id: actionErr; waitForEnd: true }
     onExited: function (exitCode) {
+      root.reapplying = false
       if (exitCode !== 0) {
         // start already prints scrcpy's own words on failure; surface the last
         // meaningful line rather than inventing a message.

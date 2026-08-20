@@ -49,9 +49,21 @@ Panel {
   // An explicit camera id would override the facing the user just picked, so
   // choosing a facing clears it.
   function chooseFacing(facing) {
-    persist("cameraId", "")
-    persist("facing", facing)
-    service.refreshCameras()
+    // No camera re-listing here: the list belongs to the phone, not to the
+    // facing, and sizeOptions is already derived from it. Asking for it now
+    // would open the camera on the phone at the same moment scrcpy is trying
+    // to claim it for the restart, and the capture loses that race.
+    var change = {cameraId: "", facing: facing}
+
+    // Carry the resolution over only if the camera being switched to actually
+    // offers it. Otherwise scrcpy refuses the size and the stream drops for a
+    // beat before the CLI's fallback rescues it — better to not ask.
+    if (!Model.sizeSupported(service.cameras, facing, "", service.setting("size", ""))) {
+      change.size = ""
+    }
+
+    persist(change)
+    service.applyLive(change)
   }
 
   readonly property var previewSizes: ["small", "medium", "large"]
@@ -62,11 +74,13 @@ Panel {
     return previewSizes[Math.max(0, Math.min(previewSizes.length - 1, index + step))]
   }
 
-  function persist(key, value) {
+  // Takes a whole set of values, because writing them one at a time would read
+  // back a stale `settings` for the second key and undo the first.
+  function persist(values) {
     if (!bar || !bar.shell || typeof bar.shell.updateEntryInline !== "function") return
     var entry = {id: root.moduleName}
     for (var k in settings) if (k !== "id") entry[k] = settings[k]
-    entry[key] = value
+    for (var key in values) entry[key] = values[key]
     bar.shell.updateEntryInline(root.moduleName, entry)
   }
 
@@ -338,7 +352,10 @@ Panel {
               return out
             }
             value: String(service.setting("size", ""))
-            onChanged: function (value) { root.persist("size", value) }
+            onChanged: function (value) {
+              root.persist({size: value})
+              service.applyLive({size: value})
+            }
           }
 
           Text {
@@ -412,7 +429,12 @@ Panel {
             value: service.previewSource
             foreground: root.foreground
             fontFamily: root.fontFamily
-            onChanged: function (value) { root.persist("previewSource", value) }
+            onChanged: function (value) {
+              root.persist({previewSource: value})
+              // The two sources are different windows owned by different
+              // processes, so an open preview has to be re-made, not retargeted.
+              service.reopenPreview(value)
+            }
           }
 
           Text {
