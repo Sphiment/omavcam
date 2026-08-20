@@ -105,6 +105,16 @@ function shortlistSizes(sizes, limit) {
   return out
 }
 
+// Resolutions belong to a camera, not to the phone: the back sensor's 4080x3060
+// simply does not exist on the front one, and scrcpy rejects a size the camera
+// does not advertise. Used when switching cameras, to drop a size that would
+// not survive the move.
+function sizeSupported(cameras, facing, cameraId, size) {
+  var wanted = String(size || "")
+  if (wanted === "") return true
+  return sizeOptions(cameras, facing, cameraId).indexOf(wanted) !== -1
+}
+
 function facingLabel(facing) {
   switch (String(facing || "").toLowerCase()) {
   case "front": return "Front"
