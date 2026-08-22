@@ -14,6 +14,7 @@ working state.
 | v4l2 device | One fixed labelled node, `/dev/video42`, `card_label="omavcam"` |
 | Preview | Headless by default; floating movable window, toggleable |
 | Preview source | Loopback (`mpv`) or scrcpy's own window, user's choice |
+| Preview placement | Nine named anchors, remembered; a magnet on drag release, on by default |
 | Hyprland rules | Applied at runtime with `hyprctl keyword` — never writes to your config |
 | Phone microphone | Deferred; `v4l2loopback` is video-only and audio needs a PipeWire path |
 
@@ -49,6 +50,9 @@ process.
       controls, start/stop, and the missing-dependency install prompt.
 - [x] **4 — Floating preview.** Movable, pinned preview window, from either the
       loopback node or scrcpy's own window.
+- [x] **4.1 — Snapping.** Nine anchors that clear the bar, a drag-release
+      magnet with a threshold, the position remembered across reboots, and a
+      setting to turn the whole thing off.
 - [ ] **5 — Screen mirror mode.** Mirror the phone's display into the webcam.
 - [ ] **6 — Wireless transport.** `adb tcpip`, remembered devices, connection
       states.

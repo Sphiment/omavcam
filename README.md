@@ -35,7 +35,8 @@ omarchy plugin remove sphiment.omavcam     # remove the plugin
 
 `uninstall` deletes the two files `setup` wrote, unloads the `v4l2loopback`
 module if nothing else is using it, stops any capture, and clears omavcam's
-runtime state. It asks first, and leaves the packages alone unless you pass
+state — both the runtime kind and the preferences it saved, such as where you
+last parked the preview. It asks first, and leaves the packages alone unless you pass
 `--packages`.
 
 Removing the plugin without running `uninstall` leaves the module config behind;
@@ -105,6 +106,7 @@ capture without opening anything. Inside the panel:
 | `f` / `b` | Switch to the front or back camera |
 | `p` | Show or hide the preview window |
 | `+` / `-` | Step the preview through small, medium, large, original |
+| `e` | Snap the preview to edges, or let it float free |
 | `r` | Re-read the phone, its cameras, and the system state |
 | `esc` | Close |
 
@@ -142,6 +144,30 @@ There are two things it can show:
 
 omavcam applies its Hyprland rules at runtime with `hyprctl`, so installing it
 never writes into your Hyprland config.
+
+### Snapping
+
+Drag the preview with `Super` and let go near a corner, an edge, or the middle
+of the screen, and it parks itself there — clear of the bar, with the same
+margin everywhere. Let go anywhere else and it stays exactly where you dropped
+it: the snap is a magnet with a range, not a grid you are stuck to.
+
+Wherever it ends up is remembered, so resizing it or closing and reopening it
+puts it back in the same place rather than returning it to the corner. Drag it
+onto a second monitor and it snaps to that monitor's edges.
+
+Turn it off with `e` in the panel, from the plugin's settings, or from a
+terminal:
+
+```bash
+omavcam preview snap off
+```
+
+The same nine positions are available by name, which is handy for a keybinding:
+
+```bash
+omavcam preview move top-right
+```
 
 Changes apply to a running stream. scrcpy fixes the camera, resolution and
 frame rate when it launches, so none of them can be altered on a live stream —
