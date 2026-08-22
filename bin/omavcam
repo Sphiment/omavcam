@@ -60,10 +60,29 @@ readonly LOG_FILE="$STATE_DIR/capture.log"
 readonly PREVIEW_PID_FILE="$STATE_DIR/preview.pid"
 readonly PREVIEW_SIZE_FILE="$STATE_DIR/preview.size"
 
+# STATE_DIR lives under XDG_RUNTIME_DIR, which is tmpfs: nothing in it survives
+# a reboot. A remembered preview position has to, or it is not remembered at
+# all, so preferences go in the user's state directory instead.
+CONFIG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omavcam"
+readonly CONFIG_DIR
+readonly PREVIEW_ANCHOR_FILE="$CONFIG_DIR/preview.anchor"
+
 # The preview window is identified by title, which both mpv and scrcpy can set,
 # so one set of Hyprland rules covers either source.
 readonly PREVIEW_TITLE="OmavcamPreview"
 readonly PREVIEW_MARGIN=40
+
+# Where a preview can be parked: the four corners, the middle of each edge, and
+# the centre. Names rather than coordinates, because the coordinates are worked
+# out against whichever monitor the window is on — so a remembered anchor is
+# still the right place on a second screen, at another resolution, or after the
+# window has been resized.
+readonly PREVIEW_ANCHORS=(
+  top-left top top-right
+  left center right
+  bottom-left bottom bottom-right
+)
+readonly PREVIEW_DEFAULT_ANCHOR="bottom-right"
 
 # loopback shows the node itself — exactly the frames the meeting app receives,
 # and independent of the capture, so it can be toggled at will. scrcpy shows
@@ -95,7 +114,7 @@ Commands:
   restart [options] Apply new settings to a running capture
   stop              Stop streaming
   status [--json]   Report whether a capture is running
-  preview <action>  on, off, toggle, reopen, or resize <preset>
+  preview <action>  on, off, toggle, reopen, move <anchor>, or resize <preset>
   help              Show this message
 
 Start options:
@@ -113,6 +132,13 @@ Preview presets:
 
   original is the stream's real pixel size, uncompressed — on a phone that
   out-resolves the monitor the window is larger than the screen by design.
+
+Preview anchors:
+  top-left, top, top-right, left, center, right,
+  bottom-left, bottom, bottom-right
+
+  The anchor is remembered, so a resize or a reopen puts the preview back
+  where it was last placed.
 
 Environment:
   OMAVCAM_VIDEO_NR        Which /dev/videoN to claim, 0-255 (default: 42)
@@ -508,6 +534,25 @@ ensure_state_dir() {
 
   [[ -d $STATE_DIR ]] || mkdir -m 700 "$STATE_DIR" 2>/dev/null || true
   assert_private_dir "$STATE_DIR"
+}
+
+# The persistent half of the state, under $HOME rather than the runtime dir.
+# Reports failure instead of dying: a preference that cannot be saved is worth
+# losing, never worth refusing the action the user asked for.
+ensure_config_dir() {
+  [[ -L $CONFIG_DIR ]] && return 1
+
+  if [[ ! -d $CONFIG_DIR ]]; then
+    # The XDG parents are made with whatever mode the user's umask gives them —
+    # they are shared directories and not ours to lock down — and our own level
+    # is then made explicitly at 700. `mkdir -p -m` would not do this: with -p
+    # the mode reaches only the deepest directory.
+    mkdir -p "${CONFIG_DIR%/*}" 2>/dev/null || return 1
+    mkdir -m 700 "$CONFIG_DIR" 2>/dev/null || return 1
+  fi
+
+  [[ -O $CONFIG_DIR ]] || return 1
+  return 0
 }
 
 # A pid file alone is not proof: pids get recycled, and a crashed scrcpy leaves
@@ -929,11 +974,12 @@ cmd_status() {
       --argjson meta "$meta" \
       --argjson previewOpen "$preview_open" \
       --arg previewSize "$(preview_size_name)" \
+      --arg previewAnchor "$(preview_anchor_name)" \
       --arg previewSource "$PREVIEW_SOURCE" \
       --argjson original "$(preview_original_json)" \
       '{running: $running, streaming: $streaming, pid: $pid, capture: $meta,
-        preview: {open: $previewOpen, size: $previewSize, source: $previewSource,
-                  original: $original}}
+        preview: {open: $previewOpen, size: $previewSize, anchor: $previewAnchor,
+                  source: $previewSource, original: $original}}
        | .uptimeSec = (if $meta.startedAt then (now | floor) - $meta.startedAt else null end)'
     return 0
   fi
@@ -948,7 +994,8 @@ cmd_status() {
   printf '  camera   %s\n' "$(jq -r 'if .cameraId != "" then "id " + .cameraId else .facing end' <<<"$meta")"
   printf '  pid      %s\n' "$pid"
   printf '  live     %s\n' "$streaming"
-  preview_running && printf '  preview  %s (%s)\n' "$(preview_size_name)" "$PREVIEW_SOURCE"
+  preview_running && printf '  preview  %s at %s (%s)\n' \
+    "$(preview_size_name)" "$(preview_anchor_name)" "$PREVIEW_SOURCE"
 }
 
 # --------------------------------------------------------------- preview ----
@@ -1153,11 +1200,166 @@ preview_original_fits() {
   return 0
 }
 
+# -------------------------------------------------------------- anchoring ----
+
+preview_anchor_valid() {
+  local candidate="${1:-}" anchor
+  for anchor in "${PREVIEW_ANCHORS[@]}"; do
+    [[ $anchor == "$candidate" ]] && return 0
+  done
+  return 1
+}
+
+# The anchor the preview belongs at: the last one it was moved or snapped to,
+# or the bottom-right corner it has always opened in.
+preview_anchor_name() {
+  local anchor=""
+  [[ -r $PREVIEW_ANCHOR_FILE ]] && read -r anchor <"$PREVIEW_ANCHOR_FILE" 2>/dev/null
+  preview_anchor_valid "$anchor" || anchor="$PREVIEW_DEFAULT_ANCHOR"
+  printf '%s\n' "$anchor"
+}
+
+preview_anchor_save() {
+  preview_anchor_valid "${1:-}" || return 1
+  # Best effort: not being able to remember the position is not a reason to
+  # refuse to move the window there.
+  ensure_config_dir || return 0
+  printf '%s\n' "$1" >"$PREVIEW_ANCHOR_FILE" 2>/dev/null || true
+}
+
+# A monitor's logical geometry and its reserved area, as one line of numbers:
+# x y width height reservedLeft reservedTop reservedRight reservedBottom.
+# Logical rather than physical, because window geometry is in logical units.
+monitor_box() {
+  jq -r '
+    . as $m
+    | (($m.transform // 0) % 2 == 1) as $rotated
+    | (.reserved // [0, 0, 0, 0]) as $r
+    | [ .x, .y,
+        (((if $rotated then .height else .width end) / .scale) | floor),
+        (((if $rotated then .width else .height end) / .scale) | floor),
+        ($r[0] // 0), ($r[1] // 0), ($r[2] // 0), ($r[3] // 0) ]
+    | @tsv'
+}
+
+# The rectangle a preview may occupy on a monitor: its logical size, less what
+# layer surfaces reserved — the Omarchy bar, mainly — and less the margin.
+# Without the reserved area the top anchors would tuck the window under the bar.
+usable_box() {
+  local mx="$1" my="$2" mw="$3" mh="$4" rl="$5" rt="$6" rr="$7" rb="$8"
+  printf '%s %s %s %s\n' \
+    $((mx + rl + PREVIEW_MARGIN)) \
+    $((my + rt + PREVIEW_MARGIN)) \
+    $((mw - rl - rr - 2 * PREVIEW_MARGIN)) \
+    $((mh - rt - rb - 2 * PREVIEW_MARGIN))
+}
+
+# Where a window of this size sits when parked at an anchor. Pure arithmetic,
+# with no compositor behind it, so the same maths can be exercised from a test.
+#
+# A window bigger than the box it is placed in is pinned to that box's edge on
+# the axis it overflows rather than hung off the far side: "original" on a phone
+# that out-resolves the monitor is meant to overflow, but it has to overflow
+# from a corner that can still be grabbed.
+anchor_origin() {
+  local anchor="$1" width="$2" height="$3" ux="$4" uy="$5" uw="$6" uh="$7"
+  local x y
+
+  case "$anchor" in
+  *left) x=$ux ;;
+  *right) x=$((ux + uw - width)) ;;
+  *) x=$((ux + (uw - width) / 2)) ;;
+  esac
+
+  case "$anchor" in
+  top*) y=$uy ;;
+  bottom*) y=$((uy + uh - height)) ;;
+  *) y=$((uy + (uh - height) / 2)) ;;
+  esac
+
+  ((width >= uw)) && x=$ux
+  ((height >= uh)) && y=$uy
+
+  printf '%s %s\n' "$x" "$y"
+}
+
+# How far a dropped window may be from an anchor and still be pulled onto it.
+# Proportional to the screen, so the magnet feels the same on a 1080p laptop and
+# on a 4K desktop, bounded so it is neither imperceptible nor screen-wide.
+preview_snap_threshold() {
+  local threshold=$((${1:-0} * 12 / 100))
+  ((threshold < 80)) && threshold=80
+  ((threshold > 200)) && threshold=200
+  printf '%s\n' "$threshold"
+}
+
+# The anchor a dropped window is closest to, or failure when it is further from
+# every one of them than the threshold. Dropping a window in open space has to
+# leave it in open space, or snapping stops being an assist and becomes a cage.
+#
+# Distance is measured corner to corner. The window keeps its size, so corner to
+# corner and centre to centre rank the anchors identically, and the corner is
+# the number the placement actually uses.
+nearest_anchor() {
+  local width="$1" height="$2" x="$3" y="$4"
+  local ux="$5" uy="$6" uw="$7" uh="$8" threshold="$9"
+  local best="" best_distance=-1
+  local anchor ax ay dx dy distance
+
+  # A window too big for the box on both axes has no anchor to be at: every one
+  # of them resolves to the same corner. Snapping it would be a magnet with one
+  # pole, dragging it back to that corner on every drop.
+  ((width >= uw && height >= uh)) && return 1
+
+  # With one axis unusable, every anchor along it resolves to the same place.
+  # Scanning only the ones that name the free axis keeps the answer — and so the
+  # position that gets remembered — from depending on the order of the list.
+  local candidates=("${PREVIEW_ANCHORS[@]}")
+  ((width >= uw)) && candidates=(top center bottom)
+  ((height >= uh)) && candidates=(left center right)
+
+  for anchor in "${candidates[@]}"; do
+    read -r ax ay < <(anchor_origin "$anchor" "$width" "$height" "$ux" "$uy" "$uw" "$uh")
+    dx=$((x - ax))
+    dy=$((y - ay))
+    # An oversized window has nowhere to go on the axis it overflows: every
+    # anchor puts it in the same place. Counting that unavoidable offset would
+    # let it push every anchor out of range, so the free axis decides alone.
+    ((width >= uw)) && dx=0
+    ((height >= uh)) && dy=0
+    distance=$((dx * dx + dy * dy))
+    if ((best_distance < 0 || distance < best_distance)); then
+      best_distance=$distance
+      best=$anchor
+    fi
+  done
+
+  ((best_distance >= 0)) || return 1
+  ((best_distance <= threshold * threshold)) || return 1
+  printf '%s\n' "$best"
+}
+
+# Where a snap actually puts the window: at the anchor, except on an axis the
+# window is too big for, where it keeps the coordinate it already had. An
+# oversized preview is dragged to choose which part of the frame is on screen,
+# and a magnet that hauled it back to the same corner would be fighting that.
+snap_target() {
+  local anchor="$1" width="$2" height="$3" x="$4" y="$5"
+  local ux="$6" uy="$7" uw="$8" uh="$9"
+  local ax ay
+  read -r ax ay < <(anchor_origin "$anchor" "$width" "$height" "$ux" "$uy" "$uw" "$uh")
+  ((width >= uw)) && ax=$x
+  ((height >= uh)) && ay=$y
+  printf '%s %s\n' "$ax" "$ay"
+}
+
 # Presets scale from monitor height, so the preview occupies the same share of
-# a 1080p screen and a 4K one. Anchored bottom-right, matching where Omarchy's
-# own webcam overlay sits.
+# a 1080p screen and a 4K one. Placed at the remembered anchor, which starts out
+# as the bottom-right corner, matching where Omarchy's own webcam overlay sits.
 preview_place() {
   local size_name="$1"
+  local anchor="${2:-}"
+  [[ -n $anchor ]] || anchor=$(preview_anchor_name)
   command -v hyprctl >/dev/null 2>&1 || return 0
 
   local client address
@@ -1171,16 +1373,11 @@ preview_place() {
   monitor=$(hyprctl monitors -j 2>/dev/null |
     jq -cer --argjson id "$monitor_id" 'first(.[] | select(.id == $id)) // empty' 2>/dev/null) || return 0
 
-  local mx my mw mh
-  read -r mx my mw mh < <(
-    jq -r '
-      . as $m
-      | (($m.transform // 0) % 2 == 1) as $rotated
-      | [ .x, .y,
-          (((if $rotated then .height else .width end) / .scale) | floor),
-          (((if $rotated then .width else .height end) / .scale) | floor) ]
-      | @tsv' <<<"$monitor"
-  )
+  local mx my mw mh rl rt rr rb
+  read -r mx my mw mh rl rt rr rb < <(monitor_box <<<"$monitor")
+
+  local ux uy uw uh
+  read -r ux uy uw uh < <(usable_box "$mx" "$my" "$mw" "$mh" "$rl" "$rt" "$rr" "$rb")
 
   local width height
   local native_w native_h
@@ -1207,20 +1404,17 @@ preview_place() {
     width=$((height * aw / ah))
 
     # A wide stream on a short screen can overflow; clamp to the space the
-    # margins leave rather than letting the preview run off the monitor. Only
-    # the proportional presets are clamped — original is meant to overflow.
-    local max_width=$((mw - 2 * PREVIEW_MARGIN))
-    if ((max_width > 0 && width > max_width)); then
-      width=$max_width
+    # margins and the bar leave rather than letting the preview run off the
+    # monitor. Only the proportional presets are clamped — original is meant to
+    # overflow.
+    if ((uw > 0 && width > uw)); then
+      width=$uw
       height=$((width * ah / aw))
     fi
   fi
 
   local x y
-  x=$((mx + mw - width - PREVIEW_MARGIN))
-  y=$((my + mh - height - PREVIEW_MARGIN))
-  ((x < mx + PREVIEW_MARGIN)) && x=$((mx + PREVIEW_MARGIN))
-  ((y < my + PREVIEW_MARGIN)) && y=$((my + PREVIEW_MARGIN))
+  read -r x y < <(anchor_origin "$anchor" "$width" "$height" "$ux" "$uy" "$uw" "$uh")
 
   local window="address:$address"
   hypr_dispatch \
@@ -1396,6 +1590,15 @@ cmd_preview() {
       printf 'closed\n'
       return 1
     fi
+    ;;
+  move)
+    local anchor="${1:-}"
+    preview_anchor_valid "$anchor" ||
+      die "preview move takes one of: ${PREVIEW_ANCHORS[*]}"
+    preview_running || die "the preview is not open"
+    preview_anchor_save "$anchor"
+    preview_place "$(preview_size_name)" "$anchor"
+    printf '%s\n' "$anchor"
     ;;
   resize)
     local preset="${1:-reset}"
@@ -1634,9 +1837,62 @@ cmd_uninstall() {
     sudo pacman -Rs --noconfirm "${REQUIRED_PACKAGES[@]}" || true
   fi
 
-  rm -rf "$STATE_DIR"
+  rm -rf "$STATE_DIR" "$CONFIG_DIR"
   printf '\nDone. Remove the plugin itself with:\n'
   printf '  omarchy plugin remove sphiment.omavcam\n'
+}
+
+# The anchor a drop snaps to and the coordinates it lands on, with the
+# compositor taken out of the loop: everything hyprctl would have reported is
+# passed in instead. Prints "anchor x y", or "none" when the drop is out of
+# range of every anchor. Not in the usage text — it exists so the geometry can
+# be tested on a machine with no Hyprland, no phone and no monitors, which is
+# where CI runs.
+cmd_snap_nearest() {
+  (($# == 12)) ||
+    die "__snap-nearest takes mx my mw mh resLeft resTop resRight resBottom width height x y"
+
+  local value
+  for value in "$@"; do
+    [[ $value =~ ^-?[0-9]+$ ]] || die "__snap-nearest takes integers, got: $value"
+  done
+
+  local mx="$1" my="$2" mw="$3" mh="$4" rl="$5" rt="$6" rr="$7" rb="$8"
+  local width="$9" height="${10}" x="${11}" y="${12}"
+
+  local ux uy uw uh
+  read -r ux uy uw uh < <(usable_box "$mx" "$my" "$mw" "$mh" "$rl" "$rt" "$rr" "$rb")
+
+  local anchor
+  if ! anchor=$(nearest_anchor "$width" "$height" "$x" "$y" \
+    "$ux" "$uy" "$uw" "$uh" "$(preview_snap_threshold "$mh")"); then
+    printf 'none\n'
+    return 0
+  fi
+
+  printf '%s %s\n' "$anchor" \
+    "$(snap_target "$anchor" "$width" "$height" "$x" "$y" "$ux" "$uy" "$uw" "$uh")"
+}
+
+# Where a window of that size lands at that anchor, on those numbers. Hidden for
+# the same reason as __snap-nearest, and paired with it: one test can then move
+# a window to an anchor and check it is snapped back to the same one.
+cmd_snap_origin() {
+  (($# == 11)) ||
+    die "__snap-origin takes anchor mx my mw mh resLeft resTop resRight resBottom width height"
+
+  local anchor="$1"
+  shift
+  preview_anchor_valid "$anchor" || die "unknown anchor: $anchor"
+
+  local value
+  for value in "$@"; do
+    [[ $value =~ ^-?[0-9]+$ ]] || die "__snap-origin takes integers, got: $value"
+  done
+
+  local ux uy uw uh
+  read -r ux uy uw uh < <(usable_box "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8")
+  anchor_origin "$anchor" "$9" "${10}" "$ux" "$uy" "$uw" "$uh"
 }
 
 # ------------------------------------------------------------------ main ----
@@ -1656,6 +1912,8 @@ main() {
   stop) cmd_stop "$@" ;;
   status) cmd_status "$@" ;;
   preview) cmd_preview "$@" ;;
+  __snap-nearest) cmd_snap_nearest "$@" ;;
+  __snap-origin) cmd_snap_origin "$@" ;;
   help | --help | -h) usage ;;
   *)
     usage >&2

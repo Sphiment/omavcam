@@ -104,6 +104,19 @@ jobs:
       - name: Only a bounded decimal is accepted
         run: tests/video_nr_test.sh
 
+  snap-geometry:
+    name: Preview snap geometry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Where the preview lands is pure arithmetic over numbers hyprctl reports,
+      # so all of it can be checked on a runner with no compositor — and it is
+      # the part most likely to break quietly, since a wrong anchor still moves
+      # the window somewhere plausible.
+      - name: Anchors, thresholds and oversized windows
+        run: tests/snap_anchor_test.sh
+
   shellcheck:
     name: Shellcheck
     runs-on: ubuntu-latest
