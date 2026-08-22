@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "sphiment.omavcam",
   "name": "omavcam",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": "Sphiment",
   "license": "MIT",
   "description": "Use an Android phone as a virtual webcam, via scrcpy and v4l2loopback.",
@@ -27,7 +27,8 @@
       "serial": "",
       "refreshIntervalSec": 5,
       "hideWhenIdle": false,
-      "previewSource": "loopback"
+      "previewSource": "loopback",
+      "previewSnap": true
     },
     "schema": [
       {
@@ -73,6 +74,13 @@
           "scrcpy"
         ],
         "defaultValue": "loopback"
+      },
+      {
+        "key": "previewSnap",
+        "type": "boolean",
+        "label": "Snap the preview to edges",
+        "description": "Dragging the preview near a corner, an edge, or the centre parks it there. Drop it anywhere else and it stays where you put it.",
+        "defaultValue": true
       },
       {
         "key": "serial",
