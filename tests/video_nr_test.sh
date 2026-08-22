@@ -51,6 +51,8 @@ check "negative"                    rejected -1
 check "not a number"                rejected abc
 check "trailing junk"               rejected "42 foo"
 check "quote"                       rejected '42"'
+# The literal characters are the point here — nothing should expand.
+# shellcheck disable=SC2016
 check "command substitution"        rejected '$(id -u)'
 check "newline injects a directive" rejected "$(printf '42\noptions v4l2loopback evil=1')"
 

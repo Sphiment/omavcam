@@ -30,8 +30,9 @@ readonly MODULES_LOAD_CONF="/etc/modules-load.d/omavcam.conf"
 # that privilege boundary. 255 is the last minor the video device registry
 # hands out; leading zeros are refused rather than silently read as octal.
 VIDEO_NR="${OMAVCAM_VIDEO_NR:-42}"
-[[ $VIDEO_NR =~ ^(0|[1-9][0-9]*)$ ]] && ((VIDEO_NR <= 255)) ||
+if ! [[ $VIDEO_NR =~ ^(0|[1-9][0-9]*)$ ]] || ((VIDEO_NR > 255)); then
   die "OMAVCAM_VIDEO_NR must be a whole number from 0 to 255, not '$VIDEO_NR'"
+fi
 readonly VIDEO_NR
 readonly DEVICE="/dev/video${VIDEO_NR}"
 
