@@ -117,6 +117,18 @@ jobs:
       - name: Anchors, thresholds and oversized windows
         run: tests/snap_anchor_test.sh
 
+  snap-setting:
+    name: Snapping preference
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The panel passes the setting in the environment and the CLI saves it to
+      # a file, so which of the two wins decides whether the toggle appears to
+      # do nothing. No compositor needed to check that.
+      - name: The preference is saved, read back, and overridable
+        run: tests/snap_setting_test.sh
+
   shellcheck:
     name: Shellcheck
     runs-on: ubuntu-latest
