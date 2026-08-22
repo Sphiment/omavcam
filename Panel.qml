@@ -106,6 +106,15 @@ Panel {
     service.setPreviewSize(size)
   }
 
+  function togglePreviewSnap() {
+    var enabled = !service.previewSnap
+    // Persisted first so the setting and the running watcher never disagree;
+    // the CLI is told the new value outright, since `settings` here is still
+    // the old one until the write comes back.
+    root.persist({previewSnap: enabled})
+    service.setPreviewSnap(enabled)
+  }
+
   function nextPreviewSize(step) {
     var index = previewSizes.indexOf(service.previewSize)
     if (index === -1) index = 1
@@ -154,6 +163,7 @@ Panel {
     function stop(): void { service.stop() }
     function toggleCapture(): void { service.toggle() }
     function togglePreview(): void { service.togglePreview() }
+    function togglePreviewSnap(): void { root.togglePreviewSnap() }
   }
 
   BarIconButton {
@@ -212,6 +222,7 @@ Panel {
         else if (key === "f") root.chooseFacing("front")
         else if (key === "b") root.chooseFacing("back")
         else if (key === "p") service.togglePreview()
+        else if (key === "e") root.togglePreviewSnap()
         else if (key === "+" || key === "=") root.choosePreviewSize(nextPreviewSize(1))
         else if (key === "-" || key === "_") root.choosePreviewSize(nextPreviewSize(-1))
       }
@@ -496,6 +507,45 @@ Panel {
             foreground: root.foreground
             fontFamily: root.fontFamily
             onChanged: function (value) { root.choosePreviewSize(value) }
+          }
+
+          // Shown whether or not the preview is open, unlike the size buttons:
+          // it is a preference about what dragging does rather than a command,
+          // and `e` sets it from the keyboard at any time.
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(snapLabel.implicitHeight, snapSwitch.implicitHeight)
+
+            Text {
+              id: snapLabel
+              anchors.left: parent.left
+              anchors.right: snapSwitch.left
+              anchors.rightMargin: Style.space(12)
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Snap to edges"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              elide: Text.ElideRight
+            }
+
+            ToggleSwitch {
+              id: snapSwitch
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              checked: service.previewSnap
+              busy: service.busy
+              foreground: root.foreground
+              onToggled: root.togglePreviewSnap()
+
+              PanelToolTip {
+                visible: snapSwitch.containsMouse
+                text: service.previewSnap
+                      ? "Let the preview be dragged anywhere"
+                      : "Park the preview on the nearest edge, corner, or centre"
+                fontFamily: root.fontFamily
+              }
+            }
           }
 
           ButtonGroup {

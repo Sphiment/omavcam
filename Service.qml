@@ -42,6 +42,7 @@ Item {
 
   readonly property bool busy: actionProcess.running || setupWatch.running || previewProcess.running
   readonly property string previewSource: String(setting("previewSource", "loopback"))
+  readonly property bool previewSnap: String(setting("previewSnap", true)) !== "false"
   readonly property var device: Model.selectedDevice(devices, setting("serial", ""))
   readonly property bool hasDevice: !!device
   readonly property var effectiveCamera: Model.effectiveCamera(cameras, setting("facing", "front"), setting("cameraId", ""))
@@ -78,10 +79,15 @@ Item {
 
   // ---- reading state ------------------------------------------------------
 
-  // The CLI takes the preview source from its environment, so anything that
-  // reports or changes preview state has to run under it.
-  function withSource(args, source) {
-    return ["env", "OMAVCAM_PREVIEW_SOURCE=" + (source || previewSource)].concat(args)
+  // The CLI takes the preview source and whether snapping is on from its
+  // environment, so anything that reports or changes preview state has to run
+  // under both. The environment beats the CLI's own saved preference, which is
+  // what makes the panel's toggle the one that counts.
+  function withSource(args, source, snap) {
+    var wantSnap = snap === undefined ? previewSnap : snap
+    return ["env",
+            "OMAVCAM_PREVIEW_SOURCE=" + (source || previewSource),
+            "OMAVCAM_PREVIEW_SNAP=" + (wantSnap ? "on" : "off")].concat(args)
   }
 
   // scrcpy fixes the camera, resolution and frame rate at launch, so a setting
@@ -187,6 +193,15 @@ Item {
   function togglePreview() {
     if (cli === "" || previewProcess.running) return
     previewProcess.command = withSource([cli, "preview", previewOpen ? "off" : "on"])
+    previewProcess.running = true
+  }
+
+  // The new value is passed explicitly rather than read back from settings:
+  // persisting it and running this happen in the same breath, and the setting
+  // would still be the old one.
+  function setPreviewSnap(enabled) {
+    if (cli === "" || previewProcess.running) return
+    previewProcess.command = withSource([cli, "preview", "snap", enabled ? "on" : "off"], "", enabled)
     previewProcess.running = true
   }
 
