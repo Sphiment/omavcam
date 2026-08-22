@@ -9,6 +9,12 @@
 
 set -euo pipefail
 
+# Defined before anything else so the configuration below can reject bad input.
+die() {
+  printf 'omavcam: %s\n' "$*" >&2
+  exit 1
+}
+
 readonly MODULE="v4l2loopback"
 readonly CARD_LABEL="omavcam"
 readonly MODPROBE_CONF="/etc/modprobe.d/omavcam.conf"
@@ -16,7 +22,16 @@ readonly MODULES_LOAD_CONF="/etc/modules-load.d/omavcam.conf"
 
 # Which /dev/videoN the virtual camera claims. Overridable for the rare machine
 # where 42 is already taken by another loopback consumer.
+#
+# This value is interpolated into /etc/modprobe.d/omavcam.conf, which is written
+# as root and then parsed by modprobe with privileges, so it is checked before
+# it can get that far. Anything other than a bare decimal — a space, a quote, a
+# newline — would let the caller append modprobe directives of its own across
+# that privilege boundary. 255 is the last minor the video device registry
+# hands out; leading zeros are refused rather than silently read as octal.
 VIDEO_NR="${OMAVCAM_VIDEO_NR:-42}"
+[[ $VIDEO_NR =~ ^(0|[1-9][0-9]*)$ ]] && ((VIDEO_NR <= 255)) ||
+  die "OMAVCAM_VIDEO_NR must be a whole number from 0 to 255, not '$VIDEO_NR'"
 readonly VIDEO_NR
 readonly DEVICE="/dev/video${VIDEO_NR}"
 
@@ -99,14 +114,9 @@ Preview presets:
   out-resolves the monitor the window is larger than the screen by design.
 
 Environment:
-  OMAVCAM_VIDEO_NR        Which /dev/videoN to claim (default: 42)
+  OMAVCAM_VIDEO_NR        Which /dev/videoN to claim, 0-255 (default: 42)
   OMAVCAM_PREVIEW_SOURCE  loopback (default) or scrcpy
 USAGE
-}
-
-die() {
-  printf 'omavcam: %s\n' "$*" >&2
-  exit 1
 }
 
 have() {

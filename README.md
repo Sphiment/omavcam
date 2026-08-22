@@ -85,7 +85,10 @@ bin/omavcam setup     # install dependencies and configure the virtual camera
 `exclusive_caps=1` means the node only advertises capture capability while
 something is writing to it, so "omavcam" appears in camera pickers exactly when
 you are streaming rather than sitting in every dropdown. Set `OMAVCAM_VIDEO_NR`
-if `/dev/video42` is already taken on your machine.
+if `/dev/video42` is already taken on your machine — any whole number from 0 to
+255, the range of video device minors. It is refused rather than written if it
+is anything else, since that value lands in a root-owned file that `modprobe`
+later reads with privileges.
 
 ## License
 
