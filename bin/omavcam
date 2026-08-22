@@ -541,7 +541,16 @@ ensure_state_dir() {
 # losing, never worth refusing the action the user asked for.
 ensure_config_dir() {
   [[ -L $CONFIG_DIR ]] && return 1
-  [[ -d $CONFIG_DIR ]] || mkdir -p -m 700 "$CONFIG_DIR" 2>/dev/null || return 1
+
+  if [[ ! -d $CONFIG_DIR ]]; then
+    # The XDG parents are made with whatever mode the user's umask gives them —
+    # they are shared directories and not ours to lock down — and our own level
+    # is then made explicitly at 700. `mkdir -p -m` would not do this: with -p
+    # the mode reaches only the deepest directory.
+    mkdir -p "${CONFIG_DIR%/*}" 2>/dev/null || return 1
+    mkdir -m 700 "$CONFIG_DIR" 2>/dev/null || return 1
+  fi
+
   [[ -O $CONFIG_DIR ]] || return 1
   return 0
 }
