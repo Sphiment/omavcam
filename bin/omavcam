@@ -58,6 +58,7 @@ readonly PID_FILE="$STATE_DIR/capture.pid"
 readonly META_FILE="$STATE_DIR/capture.json"
 readonly LOG_FILE="$STATE_DIR/capture.log"
 readonly PREVIEW_PID_FILE="$STATE_DIR/preview.pid"
+readonly PREVIEW_WATCH_PID_FILE="$STATE_DIR/preview-watch.pid"
 readonly PREVIEW_SIZE_FILE="$STATE_DIR/preview.size"
 
 # STATE_DIR lives under XDG_RUNTIME_DIR, which is tmpfs: nothing in it survives
@@ -66,6 +67,7 @@ readonly PREVIEW_SIZE_FILE="$STATE_DIR/preview.size"
 CONFIG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omavcam"
 readonly CONFIG_DIR
 readonly PREVIEW_ANCHOR_FILE="$CONFIG_DIR/preview.anchor"
+readonly PREVIEW_SNAP_FILE="$CONFIG_DIR/preview.snap"
 
 # The preview window is identified by title, which both mpv and scrcpy can set,
 # so one set of Hyprland rules covers either source.
@@ -83,6 +85,26 @@ readonly PREVIEW_ANCHORS=(
   bottom-left bottom bottom-right
 )
 readonly PREVIEW_DEFAULT_ANCHOR="bottom-right"
+
+# Hyprland reports no event when a window is dragged: `movewindow` is a change
+# of workspace, not of position. The end of a drag therefore has to be inferred
+# from the window's geometry, which means polling it.
+#
+# Two rates, because the cost of a tick is three short-lived processes and the
+# preview spends almost all of its life sitting still: a slow beat while nothing
+# moves, and a fast one for as long as something is. A drag that starts and ends
+# inside a single slow tick is still caught — the position has changed by the
+# next one, which switches to the fast rate and settles from there.
+readonly PREVIEW_WATCH_IDLE=1
+readonly PREVIEW_WATCH_ACTIVE=0.2
+
+# Fast ticks a window must hold still before the drag counts as finished. Three
+# is 0.6s: long enough that a pause mid-drag rarely trips it, short enough that
+# letting go feels like it snapped rather than caught up.
+readonly PREVIEW_WATCH_SETTLE=3
+
+PREVIEW_SNAP="${OMAVCAM_PREVIEW_SNAP:-}"
+readonly PREVIEW_SNAP
 
 # loopback shows the node itself — exactly the frames the meeting app receives,
 # and independent of the capture, so it can be toggled at will. scrcpy shows
@@ -114,7 +136,7 @@ Commands:
   restart [options] Apply new settings to a running capture
   stop              Stop streaming
   status [--json]   Report whether a capture is running
-  preview <action>  on, off, toggle, reopen, move <anchor>, or resize <preset>
+  preview <action>  on, off, toggle, reopen, move <anchor>, resize <preset>,\n                    or snap on|off|toggle|status
   help              Show this message
 
 Start options:
@@ -138,11 +160,14 @@ Preview anchors:
   bottom-left, bottom, bottom-right
 
   The anchor is remembered, so a resize or a reopen puts the preview back
-  where it was last placed.
+  where it was last placed. With snapping on, dragging the preview near an
+  anchor and letting go parks it there; dropping it anywhere else leaves it
+  exactly where it was dropped.
 
 Environment:
   OMAVCAM_VIDEO_NR        Which /dev/videoN to claim, 0-255 (default: 42)
   OMAVCAM_PREVIEW_SOURCE  loopback (default) or scrcpy
+  OMAVCAM_PREVIEW_SNAP    on (default) or off — overrides the saved preference
 USAGE
 }
 
@@ -975,11 +1000,13 @@ cmd_status() {
       --argjson previewOpen "$preview_open" \
       --arg previewSize "$(preview_size_name)" \
       --arg previewAnchor "$(preview_anchor_name)" \
+      --arg previewSnap "$(preview_snap_word)" \
       --arg previewSource "$PREVIEW_SOURCE" \
       --argjson original "$(preview_original_json)" \
       '{running: $running, streaming: $streaming, pid: $pid, capture: $meta,
         preview: {open: $previewOpen, size: $previewSize, anchor: $previewAnchor,
-                  source: $previewSource, original: $original}}
+                  snap: ($previewSnap == "on"), source: $previewSource,
+                  original: $original}}
        | .uptimeSec = (if $meta.startedAt then (now | floor) - $meta.startedAt else null end)'
     return 0
   fi
@@ -994,8 +1021,9 @@ cmd_status() {
   printf '  camera   %s\n' "$(jq -r 'if .cameraId != "" then "id " + .cameraId else .facing end' <<<"$meta")"
   printf '  pid      %s\n' "$pid"
   printf '  live     %s\n' "$streaming"
-  preview_running && printf '  preview  %s at %s (%s)\n' \
-    "$(preview_size_name)" "$(preview_anchor_name)" "$PREVIEW_SOURCE"
+  preview_running && printf '  preview  %s at %s, snapping %s (%s)\n' \
+    "$(preview_size_name)" "$(preview_anchor_name)" \
+    "$(preview_snap_word)" "$PREVIEW_SOURCE"
 }
 
 # --------------------------------------------------------------- preview ----
@@ -1353,6 +1381,188 @@ snap_target() {
   printf '%s %s\n' "$ax" "$ay"
 }
 
+
+# --------------------------------------------------------------- snapping ----
+
+# Whether the magnet is on: the environment first, because that is how the panel
+# passes its setting through, then the saved preference, then on. Snapping is a
+# default rather than an opt-in — a preview that lands square on an edge is what
+# people expect of an overlay, and the setting exists for when it is not wanted.
+preview_snap_enabled() {
+  local value="$PREVIEW_SNAP"
+  if [[ -z $value && -r $PREVIEW_SNAP_FILE ]]; then
+    read -r value <"$PREVIEW_SNAP_FILE" 2>/dev/null || value=""
+  fi
+
+  case "$value" in
+  off | false | 0) return 1 ;;
+  *) return 0 ;;
+  esac
+}
+
+# on or off as a word, for the places that report state rather than branch on it.
+preview_snap_word() {
+  if preview_snap_enabled; then
+    printf 'on\n'
+  else
+    printf 'off\n'
+  fi
+}
+
+preview_snap_save() {
+  ensure_config_dir || return 0
+  printf '%s\n' "$1" >"$PREVIEW_SNAP_FILE" 2>/dev/null || true
+}
+
+# The window's position and size as four numbers, straight from the compositor.
+preview_geometry() {
+  local client
+  client=$(preview_client) || return 1
+  jq -r '[.at[0], .at[1], .size[0], .size[1], .monitor, .address] | @tsv' <<<"$client"
+}
+
+# Pull the preview onto the anchor it was dropped nearest, if it was dropped
+# near one at all. Prints the anchor and the coordinates it ended up at, so the
+# watcher knows what it is now looking at; fails without touching the window
+# when the drop belongs where it landed.
+preview_snap_now() {
+  local x y width height monitor_id address
+  read -r x y width height monitor_id address < <(preview_geometry) || return 1
+  [[ -n ${address:-} ]] || return 1
+
+  local monitor
+  monitor=$(hyprctl monitors -j 2>/dev/null |
+    jq -cer --argjson id "$monitor_id" 'first(.[] | select(.id == $id)) // empty' 2>/dev/null) || return 1
+
+  local mx my mw mh rl rt rr rb
+  read -r mx my mw mh rl rt rr rb < <(monitor_box <<<"$monitor")
+
+  local ux uy uw uh
+  read -r ux uy uw uh < <(usable_box "$mx" "$my" "$mw" "$mh" "$rl" "$rt" "$rr" "$rb")
+
+  local anchor
+  anchor=$(nearest_anchor "$width" "$height" "$x" "$y" \
+    "$ux" "$uy" "$uw" "$uh" "$(preview_snap_threshold "$mh")") || return 1
+
+  local tx ty
+  read -r tx ty < <(snap_target "$anchor" "$width" "$height" "$x" "$y" "$ux" "$uy" "$uw" "$uh")
+
+  # Worth saving even when the window is already there: this is how dragging the
+  # preview teaches a later resize or reopen where it belongs.
+  preview_anchor_save "$anchor"
+
+  if ((tx != x || ty != y)); then
+    local window="address:$address"
+    hypr_dispatch \
+      "hl.dsp.window.move({ window = \"$window\", x = $tx, y = $ty })" \
+      movewindowpixel "exact $tx $ty,$window"
+  fi
+
+  printf '%s %s %s\n' "$anchor" "$tx" "$ty"
+}
+
+# Watches the preview for the end of a drag. It owns no window and kills no
+# process: the worst a stuck watcher can do is move the preview, and it exits
+# on its own as soon as the window it is watching is gone.
+preview_watch_loop() {
+  # The watcher records its own pid rather than being handed one: setsid forks,
+  # so the caller's $! is the pid of setsid and not of the process that outlives
+  # it. Recording it from the inside is the only version that is always right.
+  ensure_state_dir
+  printf '%s\n' "$$" >"$PREVIEW_WATCH_PID_FILE"
+  trap 'rm -f "$PREVIEW_WATCH_PID_FILE"; exit 0' TERM INT
+
+  local x y width height monitor_id address
+  local previous="" settled="" resolved=""
+  local still=0 interval="$PREVIEW_WATCH_IDLE"
+
+  while preview_snap_enabled; do
+    if ! read -r x y width height monitor_id address < <(preview_geometry); then
+      break
+    fi
+
+    # Size and monitor belong in the sample: a resize or a move to another
+    # screen changes where the anchors are, so both have to reopen the question
+    # of where the window should be.
+    local current="$x $y $width $height $monitor_id"
+
+    if [[ $current == "$previous" ]]; then
+      still=$((still + 1))
+    else
+      still=0
+      interval="$PREVIEW_WATCH_ACTIVE"
+    fi
+    previous="$current"
+
+    # Exactly at the settle count, so this fires once per drag rather than on
+    # every tick the window then spends sitting still.
+    if ((still == PREVIEW_WATCH_SETTLE)) && [[ $current != "$settled" ]]; then
+      settled="$current"
+      if resolved=$(preview_snap_now); then
+        # The window is about to move, which reads as motion on the next tick.
+        # Recording where it was sent stops that from looking like a new drag.
+        read -r _ x y <<<"$resolved"
+        previous="$x $y $width $height $monitor_id"
+        settled="$previous"
+      fi
+    fi
+
+    ((still > PREVIEW_WATCH_SETTLE)) && interval="$PREVIEW_WATCH_IDLE"
+    sleep "$interval"
+  done
+
+  rm -f "$PREVIEW_WATCH_PID_FILE"
+}
+
+# Same shape as the preview's own pid check: a pid file is not proof, so the
+# process behind it has to still be ours before anything is done with it.
+preview_watch_pid() {
+  local pid
+  [[ -r $PREVIEW_WATCH_PID_FILE ]] || return 1
+  read -r pid <"$PREVIEW_WATCH_PID_FILE" || return 1
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  [[ -r /proc/$pid/cmdline ]] || return 1
+  tr '\0' ' ' </proc/"$pid"/cmdline | grep -q -- 'preview watch' || return 1
+  printf '%s\n' "$pid"
+}
+
+preview_watch_running() {
+  preview_watch_pid >/dev/null 2>&1
+}
+
+preview_watch_start() {
+  preview_snap_enabled || return 0
+  preview_running || return 0
+  preview_watch_running && return 0
+  command -v hyprctl >/dev/null 2>&1 || return 0
+
+  # BASH_SOURCE rather than $0: it names this file whatever the script was
+  # invoked as, and a plugin directory is not on PATH, so the watcher can only
+  # be re-entered by absolute path.
+  local self
+  self=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null) || self="${BASH_SOURCE[0]}"
+  [[ -x $self ]] || return 0
+
+  ensure_state_dir
+  setsid "$self" preview watch >/dev/null 2>&1 &
+
+  # The watcher writes its own pid file; wait for it, so that a start followed
+  # immediately by a status does not report a watcher that is on its way up.
+  local waited=0
+  while ((waited < 20)) && ! preview_watch_running; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+}
+
+preview_watch_stop() {
+  local pid
+  if pid=$(preview_watch_pid); then
+    kill "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PREVIEW_WATCH_PID_FILE"
+}
+
 # Presets scale from monitor height, so the preview occupies the same share of
 # a 1080p screen and a 4K one. Placed at the remembered anchor, which starts out
 # as the bottom-right corner, matching where Omarchy's own webcam overlay sits.
@@ -1486,6 +1696,7 @@ preview_start() {
     restart_capture_with_window true
     wait_for_preview
     preview_place "$size_name"
+    preview_watch_start
     return 0
   fi
 
@@ -1506,6 +1717,7 @@ preview_start() {
 
   wait_for_preview
   preview_place "$size_name"
+  preview_watch_start
   printf 'Preview open.\n'
 }
 
@@ -1520,6 +1732,8 @@ wait_for_preview() {
 }
 
 preview_stop() {
+  preview_watch_stop
+
   if [[ $PREVIEW_SOURCE == scrcpy ]]; then
     capture_running && restart_capture_with_window false
     rm -f "$PREVIEW_PID_FILE"
@@ -1590,6 +1804,47 @@ cmd_preview() {
       printf 'closed\n'
       return 1
     fi
+    ;;
+  snap)
+    local state="${1:-toggle}"
+    case "$state" in
+    on) ;;
+    off) ;;
+    toggle)
+      if preview_snap_enabled; then state=off; else state=on; fi
+      ;;
+    status)
+      preview_snap_enabled || {
+        printf 'off\n'
+        return 1
+      }
+      printf 'on\n'
+      return 0
+      ;;
+    *) die "preview snap takes on, off, toggle, or status" ;;
+    esac
+
+    preview_snap_save "$state"
+    # The environment beats the file, so a panel that passes the opposite value
+    # would leave the CLI reporting one thing and doing another. Say so rather
+    # than pretending the preference took.
+    if [[ -n $PREVIEW_SNAP && $PREVIEW_SNAP != "$state" ]]; then
+      printf 'Saved, but OMAVCAM_PREVIEW_SNAP=%s is set and wins for this run.\n' \
+        "$PREVIEW_SNAP" >&2
+    fi
+
+    if [[ $state == on ]]; then
+      preview_watch_start
+    else
+      preview_watch_stop
+    fi
+    printf '%s\n' "$state"
+    ;;
+  watch)
+    # Internal: the drag watcher, started and stopped with the preview. Running
+    # it by hand is harmless — a second one exits immediately.
+    preview_watch_running && return 0
+    preview_watch_loop
     ;;
   move)
     local anchor="${1:-}"
