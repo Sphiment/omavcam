@@ -92,17 +92,29 @@ jobs:
       - name: Run helper tests
         run: deno run --allow-read tests/model_test.js
 
+  video-nr:
+    name: OMAVCAM_VIDEO_NR validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # OMAVCAM_VIDEO_NR reaches a root-owned modprobe config that is then
+      # parsed with privileges, so the bound on it is a privilege boundary
+      # rather than a nicety, and is worth a gate of its own.
+      - name: Only a bounded decimal is accepted
+        run: tests/video_nr_test.sh
+
   shellcheck:
     name: Shellcheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run shellcheck over bin/
+      - name: Run shellcheck over bin/ and tests/
         run: |
           set -euo pipefail
           shopt -s nullglob
-          scripts=(bin/*)
+          scripts=(bin/* tests/*.sh)
           if (( ${#scripts[@]} == 0 )); then
             echo "no scripts in bin/ yet"
             exit 0
